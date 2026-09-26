@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPD | Police Department</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%23f0b429'/%3E%3Ctext x='50' y='72' font-size='64' text-anchor='middle' fill='%230a0f1c' font-family='Arial' font-weight='bold'%3E%E2%98%85%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js",
+    "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js"
+  }
+}
+</script>
+</head>
+<body>
+
+<!-- ===== ЭКРАН ЗАГРУЗКИ ===== -->
+<div id="preloader">
+  <div class="preloader-content">
+    <div class="preloader-badge">
+      <div class="preloader-ring"></div>
+      <div class="preloader-star">★</div>
+    </div>
+    <div class="preloader-title">POLICE DEPARTMENT</div>
+    <div class="preloader-sub">Genius Sculptor RolePlay</div>
+    <div class="preloader-bar"><div class="preloader-bar-fill"></div></div>
+    <div class="preloader-status" id="preloaderStatus">Загрузка...</div>
+  </div>
+</div>
+
+<!-- ===== ЭКРАН ВХОДА ===== -->
+<div id="authScreen" class="auth-screen">
+  <div class="auth-box">
+    <div class="badge big">★</div>
+    <h2>POLICE DEPARTMENT</h2>
+    <p class="doc-meta">Genius Sculptor RolePlay</p>
+
+    <div class="tabs">
+      <button class="tab active" id="tabLogin">Вход</button>
+      <button class="tab" id="tabRegister">Регистрация</button>
+    </div>
+
+    <div id="loginForm">
+      <div class="form-group">
+        <label>Имя и фамилия</label>
+        <input id="login-nick" type="text" placeholder="Anatolii Kapitula" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>Пароль</label>
+        <input id="login-pass" type="password" placeholder="••••••" autocomplete="current-password">
+      </div>
+      <button class="btn full" id="btnLogin">Войти</button>
+      <p class="error-msg" id="loginError"></p>
+    </div>
+
+    <div id="registerForm" class="hidden">
+      <div class="form-group">
+        <label>Имя и фамилия</label>
+        <input id="reg-nick" type="text" placeholder="Anatolii Kapitula" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>Пароль (минимум 6 символов)</label>
+        <input id="reg-pass" type="password" placeholder="••••••" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label>Код начальника (если есть)</label>
+        <input id="reg-code" type="text" placeholder="необязательно">
+      </div>
+      <button class="btn full" id="btnRegister">Зарегистрироваться</button>
+      <p class="error-msg" id="regError"></p>
+    </div>
+  </div>
+</div>
+
+<!-- ===== ОСНОВНОЙ САЙТ ===== -->
+<div id="appScreen" class="hidden">
+  <header class="topbar">
+    <div class="brand">
+      <div class="badge">★</div>
+      <div>
+        <h1>POLICE DEPARTMENT</h1>
+        <span class="sub">Genius Sculptor RolePlay</span>
+      </div>
+    </div>
+    <div class="search-box">
+      <input type="text" id="globalSearch" placeholder="Поиск по документам...">
+    </div>
+    <div class="user-info">
+      <div class="user-meta">
+        <div class="user-nick" id="userNick">—</div>
+        <div class="user-rank" id="userRank">—</div>
+      </div>
+      <button class="btn secondary" id="btnLogout">Выйти</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar"><nav id="nav"></nav></aside>
+    <main id="content" class="content"></main>
+  </div>
+
+  <footer class="footer">
+    © <span id="year"></span> PPD · Внутренний портал фракции
+  </footer>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
