@@ -14,7 +14,14 @@ import {
   ROLES, ROLES_ORDERED, MAX_STAFF,
   CAN_MANAGE_STAFF, CAN_DELETE_REPORTS,
   WARNING_LEVELS, DOCS, TESTS,
-  CAN_RESET_PASSWORDS_FROM_LEVEL
+  CAN_RESET_PASSWORDS_FROM_LEVEL,
+  LAWS, DETENTION_MAX_PRISON_MINUTES, DETENTION_EDIT_HOURS,
+  CAN_RELEASE_EARLY, CAN_EDIT_ANY_DETENTION,
+  STATUS_LABELS,
+  AWARD_TYPES, CAN_GIVE_AWARDS,
+  CAN_CREATE_ANNOUNCEMENTS_FROM_LEVEL, CAN_PIN_ANNOUNCEMENTS_FROM_LEVEL,
+  REPORT_TAGS,
+  CAN_PIN_REPORTS_FROM_LEVEL, CAN_UNPIN_ANY_FROM_LEVEL
 } from './data.js';
 
 /* ==================== ИНИЦИАЛИЗАЦИЯ ==================== */
@@ -33,8 +40,112 @@ let staffSort = 'rank'; // 'rank' | 'name' | 'warnings' | 'status'
 let cachedResets = [];
 let resetsUnsub = null;
 const canResetPasswords = p => p && lvl(p.rank) >= CAN_RESET_PASSWORDS_FROM_LEVEL;
+let cachedDetentions = [];
+let cachedFines = [];
+let detentionsUnsub = null;
+let finesUnsub = null;
+let cachedReports = [];
+let reportsGlobalUnsub = null;
+let cachedAnnouncements = [];
+let announcementsUnsub = null;
+let editingAnnouncementId = null;
+
+const canCreateAnnouncements = p => p && lvl(p.rank) >= CAN_CREATE_ANNOUNCEMENTS_FROM_LEVEL;
+const canPinAnnouncements    = p => p && lvl(p.rank) >= CAN_PIN_ANNOUNCEMENTS_FROM_LEVEL;
+let dashPeriod = 'week';
+let dashboardConfig = { lastClearAt: null };
+let dashboardConfigUnsub = null;
+let selectedArticles = [];   // временное хранилище для формы
+let selectedArticlesFine = [];
+let lawTypeFilter = { detentions: 'all', fines: 'all' };
+
+const canReleaseEarly = p => p && CAN_RELEASE_EARLY.includes(p.rank);
+const canEditAnyDetention = p => p && CAN_EDIT_ANY_DETENTION.includes(p.rank);
+
+/* ===== Тесты (Firestore) ===== */
+let cachedTests = [];
+let cachedTestResults = [];
+let testsUnsub = null;
+let testResultsUnsub = null;
+
+let testHistoryFilters = {
+  search: '',
+  status: 'all',      // all | pass | fail
+  period: 'all'       // all | today | week | month
+};
+let testHistorySort = 'date';  // date | score | name
+
+// Роли, которые могут УПРАВЛЯТЬ тестами (создавать, редактировать, удалять)
+// Позже можно дописать сюда "РП Куратор" и другие роли
+const TEST_MANAGER_ROLES = [
+  'Старший администратор'
+  // 'РП Куратор',  ← раскомментируешь, когда добавишь роль
+];
+
+// Роли, которые ВИДЯТ ВСЕ тесты (не только свои) — для управления и просмотра истории
+const TEST_SEE_ALL_ROLES = [
+  'Старший администратор'
+  // 'РП Куратор',
+];
+
+const canManageTests = p => p && TEST_MANAGER_ROLES.includes(p.rank);
+
+// Полковник+ или явная роль из списка — видят всё
+function canSeeAllTests(p) {
+  if (!p) return false;
+  if (TEST_SEE_ALL_ROLES.includes(p.rank)) return true;
+  return lvl(p.rank) >= 13;  // Полковник и выше
+}
+
+// Текущее прохождение теста
+let currentTestRun = null;
+
+/* ===== Файлы ===== */
+let pendingFiles = { reports: [], detentions: [], fines: [], announcements: [], question: [] };
+const MAX_FILES = 6;
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 МБ
+
+/* ===== Cloudinary ===== */
+const CLOUDINARY_CLOUD_NAME = 'fs6dto2s';
+const CLOUDINARY_PRESET = 'ppd_unsigned';
+const CLOUDINARY_UPLOAD_URL = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`;
 
 /* ==================== ПРАВА ==================== */
+// Виден ли тест текущему пользователю
+function canSeeTest(test, profile) {
+  // Если есть новый формат — используем его
+  if (Array.isArray(test.audienceRoles)) {
+    return canSeeTestDynamic(test, profile);
+  }
+  // Иначе — старая логика
+  const aud = test.audience || 'all';
+  if (aud === 'all') return true;
+  if (aud === 'civil') return true;  // вступительный видят все
+
+  // police — только полиция + начальство
+  if (aud === 'police') {
+    return isPolice(profile) || canReview(profile) || canManageStaff(profile);
+  }
+
+  // admin — только админы / правительство / губернатор
+  if (aud === 'admin') {
+    return canManageStaff(profile) || ['Губернатор','Правительство','Администратор','Старший администратор']
+      .includes(profile?.rank);
+  }
+  return false;
+}
+
+// Бейдж для карточки теста
+function testAudienceBadge(test) {
+  const map = {
+    'civil':  { text:'Для гражданских',   color:'#4a90e2' },
+    'police': { text:'Для полиции',       color:'#f0b429' },
+    'admin':  { text:'Для администрации', color:'#e74c3c' },
+    'all':    { text:'Для всех',          color:'#2ecc71' }
+  };
+  const m = map[test.audience || 'all'];
+  return `<span class="test-badge" style="border-color:${m.color};color:${m.color}">${m.text}</span>`;
+}
 const lvl = role => ROLES[role]?.level ?? 0;
 const isPolice = p => p && ROLES[p.rank]?.police === true;
 const canReview = p => p && lvl(p.rank) >= 9;
@@ -45,15 +156,630 @@ const isAdmin = p => p && ['Администратор','Старший адми
 // Кого может менять me (target): только тех, у кого уровень ниже
 function canEditUser(me, target) {
   if (!me || !target) return false;
-  if (!canManageStaff(me)) return false;
   if (me.uid === target.uid) return false;
+
+  // Руководитель ОБН — особые права: только ОБН
+  if (me.rank === 'Руководитель ОБН') {
+    return target.rank === 'Агент ОБН';
+  }
+
+  if (!canManageStaff(me)) return false;
   return lvl(me.rank) > lvl(target.rank);
 }
 
 // Какие роли может выдавать me
 function rolesIAssign(me) {
   if (!me) return [];
+
+  // Руководитель ОБН — только Агент ОБН
+  if (me.rank === 'Руководитель ОБН') {
+    return ['Агент ОБН'];
+  }
+
   return ROLES_ORDERED.filter(r => lvl(r) < lvl(me.rank));
+}
+
+// Какие роли может выдавать me ЧЕРЕЗ ПРИГЛАШЕНИЯ
+function rolesIAssignViaInvite(me) {
+  if (!me) return [];
+  const role = me.rank;
+
+  // Руководитель ОБН — только Агент ОБН
+  if (role === 'Руководитель ОБН') {
+    return ['Агент ОБН'];
+  }
+
+  // Полковник — только младший состав
+  if (role === 'Полковник') {
+    return ['Рядовой', 'Капрал', 'Сержант'];
+  }
+
+  // Генерал — все роли ниже себя
+  if (role === 'Генерал полиции') {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(role));
+  }
+
+  // Губернатор — все роли ниже себя
+  if (role === 'Губернатор') {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(role));
+  }
+
+  // Старший администратор — все роли кроме своей
+  if (role === 'Старший администратор') {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(role));
+  }
+
+  return [];
+}
+
+const canGiveAwards = p => p && CAN_GIVE_AWARDS.includes(p.rank);
+
+const canPinReports = p => p && lvl(p.rank) >= CAN_PIN_REPORTS_FROM_LEVEL;
+const canUnpinAny   = p => p && lvl(p.rank) >= CAN_UNPIN_ANY_FROM_LEVEL;
+
+// Может ли текущий пользователь закрепить/открепить конкретный отчёт
+function canTogglePin(report) {
+  if (!currentProfile) return false;
+  if (!canPinReports(currentProfile)) return false;
+  if (!report.pinned) return true;                           // закрепить — Майор+
+  // открепить — только тот, кто закрепил, или Полковник+
+  if (canUnpinAny(currentProfile)) return true;
+  return report.pinnedByUid === currentUser?.uid;
+}
+
+/* ==================== ЗАКРЕПЛЁННЫЕ ОТЧЁТЫ ==================== */
+async function togglePinReport(id, currentPinned) {
+  const update = currentPinned
+    ? { pinned: false, pinnedByUid: null, pinnedByNick: null, pinnedAt: null }
+    : {
+        pinned: true,
+        pinnedByUid: currentUser.uid,
+        pinnedByNick: currentProfile.nickname,
+        pinnedAt: serverTimestamp()
+      };
+  await updateDoc(doc(db,'reports', id), update);
+  toast(currentPinned ? 'Отчёт откреплён' : 'Отчёт закреплён 📌');
+}
+
+/* ==================== ТЕСТЫ — CRUD ==================== */
+
+/* ==================== МОДАЛКА СОЗДАНИЯ/РЕДАКТИРОВАНИЯ ТЕСТА ==================== */
+function openTestCreateModal(existing) {
+  const isEdit = !!existing;
+  const t = existing || {};
+
+  // Выбранные роли (Set для удобства)
+  const selectedRoles = new Set(t.audienceRoles || []);
+
+  // Все доступные роли для выбора (из ROLES_ORDERED)
+  const allRoles = ROLES_ORDERED.filter(r => ROLES[r]);  // только валидные
+
+  const rolesHtml = allRoles.map(role => {
+    const checked = selectedRoles.has(role) ? 'checked' : '';
+    return `
+      <label class="role-checkbox">
+        <input type="checkbox" value="${escapeHtml(role)}" ${checked}>
+        <span>${escapeHtml(role)}</span>
+      </label>
+    `;
+  }).join('');
+
+  openModal(`
+    <h3>${isEdit ? '✏️ Редактировать тест' : '🎓 Создать тест'}</h3>
+    <p class="modal-sub">${isEdit ? 'Измени настройки теста' : 'Заполни базовые настройки — вопросы добавишь потом'}</p>
+
+    <div class="form-group">
+      <label>Название теста *</label>
+      <input id="t-title" type="text" placeholder="Например: Тест на знание ПДД" value="${isEdit ? escapeHtml(t.title || '') : ''}">
+    </div>
+
+    <div class="form-group">
+      <label>Описание</label>
+      <textarea id="t-desc" placeholder="Краткое описание теста..." style="min-height:60px">${isEdit ? escapeHtml(t.description || '') : ''}</textarea>
+    </div>
+
+    <div class="form-row-2">
+      <div class="form-group">
+        <label>Проходной балл (%)</label>
+        <input id="t-pass" type="number" min="1" max="100" value="${t.passScore || 80}">
+      </div>
+      <div class="form-group">
+        <label>Время (мин, 0 = без лимита)</label>
+        <input id="t-time" type="number" min="0" max="180" value="${t.timeLimit ? Math.floor(t.timeLimit / 60) : 0}">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Кому адресован тест</label>
+      <div class="roles-picker">
+        <div class="roles-picker-head">
+          <button type="button" class="btn tiny secondary" id="rolesSelectAll">Выбрать все</button>
+          <button type="button" class="btn tiny secondary" id="rolesSelectNone">Снять все</button>
+          <button type="button" class="btn tiny secondary" id="rolesSelectPolice">Только полиция</button>
+        </div>
+        <div class="roles-grid" id="rolesGrid">
+          ${rolesHtml}
+        </div>
+        <div class="roles-hint">
+          Если ничего не выбрать — тест увидят все роли.
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Поведение</label>
+      <div class="check-line">
+        <label class="role-checkbox">
+          <input type="checkbox" id="t-shuffleQ" ${t.shuffleQuestions ? 'checked' : ''}>
+          <span>Перемешивать вопросы</span>
+        </label>
+        <label class="role-checkbox">
+          <input type="checkbox" id="t-shuffleO" ${t.shuffleOptions ? 'checked' : ''}>
+          <span>Перемешивать варианты ответа</span>
+        </label>
+        <label class="role-checkbox">
+          <input type="checkbox" id="t-hidden" ${t.hidden ? 'checked' : ''}>
+          <span>Скрыть от пользователей (тест-черновик)</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn" data-confirm>${isEdit ? 'Сохранить' : 'Создать'}</button>
+    </div>
+  `, (overlay, close) => {
+    // Кнопки управления ролями
+    overlay.querySelector('#rolesSelectAll').onclick = () => {
+      overlay.querySelectorAll('#rolesGrid input[type="checkbox"]').forEach(cb => cb.checked = true);
+    };
+    overlay.querySelector('#rolesSelectNone').onclick = () => {
+      overlay.querySelectorAll('#rolesGrid input[type="checkbox"]').forEach(cb => cb.checked = false);
+    };
+    overlay.querySelector('#rolesSelectPolice').onclick = () => {
+      const policeRoles = ['Рядовой','Капрал','Сержант','Старший сержант','SWAT',
+        'Младший лейтенант','Лейтенант','Старший лейтенант','Агент ОБН','Капитан',
+        'Майор','Подполковник','Руководитель ОБН','Полковник','Генерал полиции'];
+      overlay.querySelectorAll('#rolesGrid input[type="checkbox"]').forEach(cb => {
+        cb.checked = policeRoles.includes(cb.value);
+      });
+    };
+
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const title = overlay.querySelector('#t-title').value.trim();
+      const description = overlay.querySelector('#t-desc').value.trim();
+      const passScore = parseInt(overlay.querySelector('#t-pass').value, 10) || 80;
+      const timeMin = parseInt(overlay.querySelector('#t-time').value, 10) || 0;
+      const audienceRoles = Array.from(overlay.querySelectorAll('#rolesGrid input[type="checkbox"]:checked')).map(cb => cb.value);
+      const shuffleQuestions = overlay.querySelector('#t-shuffleQ').checked;
+      const shuffleOptions = overlay.querySelector('#t-shuffleO').checked;
+      const hidden = overlay.querySelector('#t-hidden').checked;
+
+      if (!title) return toast('Укажи название', 'err');
+      if (passScore < 1 || passScore > 100) return toast('Проходной балл — от 1 до 100', 'err');
+      if (timeMin < 0 || timeMin > 180) return toast('Время — от 0 до 180 минут', 'err');
+
+      const payload = {
+        title, description, passScore,
+        audienceRoles,
+        timeLimit: timeMin * 60,
+        shuffleQuestions, shuffleOptions, hidden
+      };
+
+      if (isEdit) {
+        await updateTest(existing.id, payload);
+        close();
+      } else {
+        const newId = await createTest(payload);
+        close();
+        // Открываем редактор нового теста
+        if (newId) location.hash = '#/test-editor/' + newId;
+      }
+    };
+  });
+}
+
+// ---------- Создать новый тест ----------
+async function createTest(data) {
+  if (!canManageTests(currentProfile)) {
+    return toast('Только ' + TEST_MANAGER_ROLES.join(', ') + ' может создавать тесты', 'err');
+  }
+  const test = {
+    title: data.title || 'Новый тест',
+    description: data.description || '',
+    passScore: data.passScore || 80,
+    audienceRoles: Array.isArray(data.audienceRoles) ? data.audienceRoles : [],
+    timeLimit: data.timeLimit || 0,
+    shuffleQuestions: !!data.shuffleQuestions,
+    shuffleOptions: !!data.shuffleOptions,
+    hidden: !!data.hidden,
+    questions: data.questions || [],
+    createdBy: currentUser.uid,
+    createdByNick: currentProfile.nickname,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  };
+  const ref = await addDoc(collection(db,'tests'), test);
+  toast('Тест создан');
+  return ref.id;
+}
+
+// ---------- Обновить настройки теста ----------
+async function updateTest(id, updates) {
+  if (!canManageTests(currentProfile)) {
+    return toast('Только ' + TEST_MANAGER_ROLES.join(', ') + ' может редактировать тесты', 'err');
+  }
+  await updateDoc(doc(db,'tests',id), {
+    ...updates,
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  });
+  toast('Тест обновлён');
+}
+
+// ---------- Удалить тест ----------
+async function deleteTest(id) {
+  if (!canManageTests(currentProfile)) {
+    return toast('Только Старший администратор может удалять тесты', 'err');
+  }
+  if (!confirm('Удалить тест со всеми вопросами?')) return;
+  await deleteDoc(doc(db,'tests',id));
+  toast('Тест удалён');
+}
+
+// ---------- Добавить вопрос ----------
+async function addQuestion(testId, question) {
+  if (!canManageTests(currentProfile)) return toast('Нет прав', 'err');
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return toast('Тест не найден', 'err');
+
+  const q = {
+    id: 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+    text: question.text || '',
+    image: question.image || '',
+    options: (question.options || []).map(o => ({
+      text: o.text || '',
+      correct: !!o.correct
+    })),
+    createdAt: new Date().toISOString()
+  };
+  const newQuestions = [...(test.questions || []), q];
+  await updateDoc(doc(db,'tests',testId), {
+    questions: newQuestions,
+    questionsEditedAt: new Date().toISOString(),
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  });
+  toast('Вопрос добавлен');
+  return q.id;
+}
+
+// ---------- Обновить вопрос ----------
+async function updateQuestion(testId, questionId, updates) {
+  if (!canManageTests(currentProfile)) return toast('Нет прав', 'err');
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return toast('Тест не найден', 'err');
+
+  const newQuestions = (test.questions || []).map(q => {
+    if (q.id !== questionId) return q;
+    return {
+      ...q,
+      text: updates.text !== undefined ? updates.text : q.text,
+      image: updates.image !== undefined ? updates.image : q.image,
+      options: updates.options !== undefined ? updates.options : q.options
+    };
+  });
+  await updateDoc(doc(db,'tests',testId), {
+    questions: newQuestions,
+    questionsEditedAt: new Date().toISOString(),
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  });
+  toast('Вопрос обновлён');
+}
+
+// ---------- Удалить вопрос ----------
+async function deleteQuestion(testId, questionId) {
+  if (!canManageTests(currentProfile)) return toast('Нет прав', 'err');
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return toast('Тест не найден', 'err');
+  if (!confirm('Удалить вопрос?')) return;
+
+  const newQuestions = (test.questions || []).filter(q => q.id !== questionId);
+  await updateDoc(doc(db,'tests',testId), {
+    questions: newQuestions,
+    questionsEditedAt: new Date().toISOString(),
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  });
+  toast('Вопрос удалён');
+}
+
+// ---------- Переместить вопрос (direction: -1 вверх, +1 вниз) ----------
+async function moveQuestion(testId, questionId, direction) {
+  if (!canManageTests(currentProfile)) return toast('Нет прав', 'err');
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return toast('Тест не найден', 'err');
+
+  const arr = [...(test.questions || [])];
+  const idx = arr.findIndex(q => q.id === questionId);
+  if (idx < 0) return;
+  const newIdx = idx + direction;
+  if (newIdx < 0 || newIdx >= arr.length) return;
+
+  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+
+  await updateDoc(doc(db,'tests',testId), {
+    questions: arr,
+    questionsEditedAt: new Date().toISOString(),
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  });
+}
+
+// ---------- Список результатов по тесту ----------
+function testResultsFor(testId) {
+  return cachedTestResults.filter(r => r.testId === testId);
+}
+
+// ---------- Список результатов по пользователю ----------
+function testResultsByUser(uid) {
+  return cachedTestResults.filter(r => r.userId === uid);
+}
+
+/* ==================== ТЕГИ ОТЧЁТОВ ==================== */
+let selectedReportTags = [];
+let activeTagFilters = [];
+
+function addReportTag(tagId) {
+  const tag = REPORT_TAGS.find(t => t.id === tagId);
+  if (!tag) return;
+  if (selectedReportTags.some(t => t.id === tagId)) return;
+  selectedReportTags.push(tag);
+  refreshTagsDisplay();
+}
+
+function removeReportTag(tagId) {
+  selectedReportTags = selectedReportTags.filter(t => t.id !== tagId);
+  refreshTagsDisplay();
+}
+
+function refreshTagsDisplay() {
+  const box = document.getElementById('tags-selected');
+  if (!box) return;
+
+  if (selectedReportTags.length === 0) {
+    box.innerHTML = '<span class="tags-empty">Теги не выбраны</span>';
+    highlightTagOptions();   // ⬅️ обновляем подсветку кнопок
+    return;
+  }
+
+  box.innerHTML = selectedReportTags.map(t => `
+    <span class="tag-chip" style="--tag-color:${t.color}">
+      ${escapeHtml(t.label)}
+      <button type="button" class="tag-remove" data-rm-tag="${t.id}">×</button>
+    </span>
+  `).join('');
+
+  box.querySelectorAll('[data-rm-tag]').forEach(b => {
+    b.onclick = () => {
+      removeReportTag(b.dataset.rmTag);
+      highlightTagOptions();   // ⬅️ обновляем подсветку кнопок
+    };
+  });
+
+  highlightTagOptions();   // ⬅️ обновляем подсветку кнопок
+}
+
+function renderTagPicker() {
+  return `
+    <div class="form-group">
+      <label>Теги</label>
+      <div class="tag-picker">
+        ${REPORT_TAGS.map(t => `
+          <button type="button" class="tag-option" data-add-tag="${t.id}" style="--tag-color:${t.color}">
+            ${escapeHtml(t.label)}
+          </button>
+        `).join('')}
+      </div>
+      <div class="tags-selected" id="tags-selected">
+        <span class="tags-empty">Теги не выбраны</span>
+      </div>
+    </div>
+  `;
+}
+
+function initTagPicker() {
+  setTimeout(() => {
+    // Восстанавливаем из черновика
+    const draft = loadDraft('reports');
+    if (draft && draft.tags && Array.isArray(draft.tags)) {
+      selectedReportTags = draft.tags
+        .map(id => REPORT_TAGS.find(t => t.id === id))
+        .filter(Boolean);
+    }
+    refreshTagsDisplay();
+    highlightTagOptions();
+
+    // Клики по тегам — toggle (вкл/выкл)
+    document.querySelectorAll('[data-add-tag]').forEach(b => {
+      b.onclick = () => {
+        const tagId = b.dataset.addTag;
+        if (selectedReportTags.some(t => t.id === tagId)) {
+          // Уже выбран — убираем
+          removeReportTag(tagId);
+        } else {
+          // Не выбран — добавляем
+          addReportTag(tagId);
+        }
+        highlightTagOptions();
+        // Обновим черновик
+        saveDraft('reports', {
+          type: document.getElementById('r-type')?.value || '',
+          partner: document.getElementById('r-partner')?.value || '',
+          desc: document.getElementById('r-desc')?.value || '',
+          tags: selectedReportTags.map(t => t.id)
+        });
+      };
+    });
+  }, 0);
+}
+
+// Подсветка активных кнопок тегов в форме
+function highlightTagOptions() {
+  document.querySelectorAll('[data-add-tag]').forEach(b => {
+    const tagId = b.dataset.addTag;
+    const isSelected = selectedReportTags.some(t => t.id === tagId);
+    b.classList.toggle('selected', isSelected);
+  });
+}
+
+function renderReportTags(tags) {
+  if (!tags || tags.length === 0) return '';
+  return `
+    <div class="report-tags-row">
+      ${tags.map(tagId => {
+        const t = REPORT_TAGS.find(x => x.id === tagId);
+        if (!t) return '';
+        return `<span class="tag-chip small" style="--tag-color:${t.color}">${escapeHtml(t.label)}</span>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderTagFilterBar() {
+  const noneActive = activeTagFilters.length === 0;
+  return `
+    <div class="tag-filter-bar">
+      <span class="tag-filter-label">Фильтр:</span>
+      <button class="tag-filter-btn ${noneActive ? 'active' : ''}" data-filter-tag="">
+        Все
+      </button>
+      ${REPORT_TAGS.map(t => `
+        <button class="tag-filter-btn ${activeTagFilters.includes(t.id) ? 'active' : ''}"
+                data-filter-tag="${t.id}"
+                style="--tag-color:${t.color}">
+          ${escapeHtml(t.label)}
+        </button>
+      `).join('')}
+    </div>
+  `;
+}
+
+function initTagFilterBar() {
+  setTimeout(() => {
+    document.querySelectorAll('[data-filter-tag]').forEach(b => {
+      b.onclick = () => {
+        const id = b.dataset.filterTag;
+        if (!id) {
+          activeTagFilters = [];
+        } else {
+          if (activeTagFilters.includes(id)) {
+            activeTagFilters = activeTagFilters.filter(x => x !== id);
+          } else {
+            activeTagFilters.push(id);
+          }
+        }
+        render();
+      };
+    });
+  }, 0);
+}
+
+/* ==================== АВТОСОХРАНЕНИЕ ЧЕРНОВИКА ==================== */
+const DRAFT_PREFIX = 'ppd_draft_';
+
+function saveDraft(key, data) {
+  try {
+    localStorage.setItem(DRAFT_PREFIX + key, JSON.stringify({
+      data,
+      savedAt: Date.now()
+    }));
+    showDraftIndicator(key);
+  } catch (e) {
+    console.warn('Не удалось сохранить черновик:', e);
+  }
+}
+
+function loadDraft(key) {
+  try {
+    const raw = localStorage.getItem(DRAFT_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed.data || null;
+  } catch (e) { return null; }
+}
+
+function clearDraft(key) {
+  try {
+    localStorage.removeItem(DRAFT_PREFIX + key);
+    hideDraftIndicator(key);
+  } catch (e) {}
+}
+
+function showDraftIndicator(key) {
+  let el = document.getElementById('draft-indicator-global');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'draft-indicator-global';
+    el.className = 'draft-indicator';
+    document.body.appendChild(el);
+  }
+  el.textContent = '💾 Черновик сохранён';
+  el.classList.add('visible');
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(() => el.classList.remove('visible'), 1500);
+}
+
+function hideDraftIndicator(key) {
+  const el = document.getElementById('draft-indicator-global');
+  if (el) el.classList.remove('visible');
+}
+
+// Универсальный инициализатор автосохранения
+// fieldMap: { htmlId: ключ_в_объекте }
+function initDraft(key, fieldMap) {
+  setTimeout(() => {
+    // Восстановление из черновика
+    const draft = loadDraft(key);
+    if (draft) {
+      Object.entries(fieldMap).forEach(([id, dataKey]) => {
+        const el = document.getElementById(id);
+        if (el && draft[dataKey] !== undefined) {
+          el.value = draft[dataKey];
+        }
+      });
+    }
+
+    // Слушатель изменений
+    Object.entries(fieldMap).forEach(([id]) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('input', () => {
+        const data = {};
+        Object.entries(fieldMap).forEach(([fid, dk]) => {
+          const e = document.getElementById(fid);
+          if (e) data[dk] = e.value;
+        });
+        saveDraft(key, data);
+      });
+      el.addEventListener('change', () => {
+        const data = {};
+        Object.entries(fieldMap).forEach(([fid, dk]) => {
+          const e = document.getElementById(fid);
+          if (e) data[dk] = e.value;
+        });
+        saveDraft(key, data);
+      });
+    });
+  }, 0);
+}
+
+function renderDraftIndicator(key) {
+  return ''; // Теперь показываем глобальный плавающий индикатор
 }
 
 /* ==================== УТИЛИТЫ ==================== */
@@ -104,6 +830,200 @@ function toast(msg, type='ok') {
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 3000);
 }
+
+/* ==================== ЗАГРУЗКА ФАЙЛОВ ==================== */
+async function uploadSingleFile(file, folder) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('upload_preset', CLOUDINARY_PRESET);
+  formData.append('folder', `ppd/${folder}`);
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', CLOUDINARY_UPLOAD_URL, true);
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const data = JSON.parse(xhr.responseText);
+          resolve({
+            url: data.secure_url,
+            publicId: data.public_id,
+            name: file.name,
+            size: file.size,
+            type: file.type
+          });
+        } catch (e) { reject(new Error('Ошибка разбора ответа')); }
+      } else {
+        reject(new Error('Ошибка ' + xhr.status));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Сеть недоступна'));
+    xhr.send(formData);
+  });
+}
+
+async function uploadAllFiles(files, folder) {
+  const results = [];
+  for (const f of files) {
+    try {
+      const info = await uploadSingleFile(f, folder);
+      results.push(info);
+    } catch (e) {
+      console.error('Ошибка загрузки:', f.name, e);
+      toast(`Не удалось: ${f.name}`, 'err');
+    }
+  }
+  return results;
+}
+
+function handleFiles(fileList, stateKey) {
+  if (!pendingFiles[stateKey]) pendingFiles[stateKey] = [];
+  const arr = Array.from(fileList);
+  const current = pendingFiles[stateKey];
+
+  const isAnnounce = stateKey === 'announcements';
+  const isQuestion = stateKey === 'question';
+
+  // Лимит файлов
+  const maxFiles = (isAnnounce || isQuestion) ? 1 : MAX_FILES;
+
+  arr.forEach(f => {
+    if (current.length >= maxFiles) {
+      return toast(`Максимум ${maxFiles} файл${maxFiles === 1 ? '' : 'ов'}`, 'err');
+    }
+    if (f.size > MAX_FILE_SIZE) {
+      return toast(`${f.name} — больше 5 МБ`, 'err');
+    }
+    // Для объявлений и вопросов — только картинки
+    const onlyImages = isAnnounce || isQuestion;
+    const ok = onlyImages
+      ? f.type.startsWith('image/')
+      : (f.type.startsWith('image/') || f.type.startsWith('video/') || f.type === 'application/pdf');
+    if (!ok) {
+      return toast(`${f.name} — неподдерживаемый тип${onlyImages ? ' (только картинки)' : ''}`, 'err');
+    }
+    current.push(f);
+  });
+  refreshUploadList(stateKey);
+}
+
+function refreshUploadList(stateKey) {
+  const list = document.getElementById(`upload-list-${stateKey}`);
+  if (!list) return;
+  const files = pendingFiles[stateKey] || [];
+
+  if (files.length === 0) { list.innerHTML = ''; return; }
+
+  list.innerHTML = files.map((f, i) => {
+    const isImg = f.type.startsWith('image/');
+    const isVideo = f.type.startsWith('video/');
+    const preview = isImg ? URL.createObjectURL(f) : null;
+
+    let thumb;
+    if (isImg) thumb = `<img src="${preview}" class="upload-thumb" alt="">`;
+    else if (isVideo) thumb = `<div class="upload-thumb video-icon">🎬</div>`;
+    else thumb = `<div class="upload-thumb file-icon">📄</div>`;
+
+    return `<div class="upload-item">
+      ${thumb}
+      <div class="upload-info">
+        <div class="upload-name">${escapeHtml(f.name)}</div>
+        <div class="upload-size">${(f.size/1024).toFixed(0)} КБ</div>
+      </div>
+      <button type="button" class="upload-remove" data-remove-file="${i}" data-state-key="${stateKey}">×</button>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('[data-remove-file]').forEach(b => {
+    b.onclick = () => {
+      const i = parseInt(b.dataset.removeFile, 10);
+      pendingFiles[b.dataset.stateKey].splice(i, 1);
+      refreshUploadList(b.dataset.stateKey);
+    };
+  });
+}
+
+function initFileUploaders() {
+  ['reports', 'detentions', 'fines', 'announcements', 'question'].forEach(key => {
+    const input = document.getElementById(`upload-input-${key}`);
+    if (!input) return;
+    input.onchange = () => { handleFiles(input.files, key); input.value = ''; };
+    refreshUploadList(key);
+  });
+
+  document.querySelectorAll('[data-attach-for]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      const input = document.getElementById(`upload-input-${btn.dataset.attachFor}`);
+      input?.click();
+    };
+  });
+}
+
+function getActiveUploadKey() {
+  // Модалка вопроса — приоритет
+  if (document.getElementById('upload-input-question')) return 'question';
+  // Модалка объявления
+  if (document.getElementById('upload-input-announcements')) return 'announcements';
+  const hash = location.hash;
+  if (hash === '#/reports') return 'reports';
+  if (hash.startsWith('#/registry/detentions')) return 'detentions';
+  if (hash.startsWith('#/registry/fines')) return 'fines';
+  return null;
+}
+
+// Ctrl+V — вставка из буфера
+document.addEventListener('paste', (e) => {
+  const key = getActiveUploadKey();
+  if (!key) return;
+  // Игнорируем вставку в другие поля (кроме textarea)
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag !== 'textarea') return;
+
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length > 0) {
+    e.preventDefault();
+    handleFiles(files, key);
+    toast('Вставлено: ' + files.length);
+  }
+});
+
+// Отображение в карточке
+function renderAttachments(files) {
+  if (!files || files.length === 0) return '';
+  return `<div class="report-files">
+    ${files.map(f => {
+      const isImg = f.type && f.type.startsWith('image/');
+      const isVideo = f.type && f.type.startsWith('video/');
+      if (isImg) {
+        return `<a href="${escapeHtml(f.url)}" target="_blank" class="report-img-link" rel="noopener">
+          <img src="${escapeHtml(f.url)}" class="report-img" alt="" loading="lazy">
+        </a>`;
+      }
+      if (isVideo) {
+        return `<div class="report-video">
+          <video controls preload="metadata" class="report-video-el">
+            <source src="${escapeHtml(f.url)}" type="${escapeHtml(f.type)}">
+          </video>
+        </div>`;
+      }
+      return `<a href="${escapeHtml(f.url)}" target="_blank" class="report-file-link" rel="noopener">
+        📄 ${escapeHtml(f.name)}
+      </a>`;
+    }).join('')}
+  </div>`;
+}
+
 /* ==================== МОДАЛЬНОЕ ОКНО ==================== */
 function openModal(html, onMount) {
   const overlay = document.createElement('div');
@@ -163,25 +1083,45 @@ async function doRegister() {
     // Определяем роль
     let assignedRole = 'Гражданский';
     let inviteUsedId = null;
+    let inviteCurrent = null;
 
     if (code === MASTER_CODE) {
       assignedRole = 'Старший администратор';
     } else if (code) {
       // Ищем в приглашениях
       const invSnap = await getDocs(query(collection(db,'invites'), where('code','==',code)));
-      if (!invSnap.empty) {
-        const invDoc = invSnap.docs[0];
-        const inv = invDoc.data();
-        if (inv.usedBy) {
-          await signOut(auth);
-          return err.textContent = 'Этот код уже использован';
-        }
-        assignedRole = inv.role;
-        inviteUsedId = invDoc.id;
-      } else {
+      if (invSnap.empty) {
         await signOut(auth);
         return err.textContent = 'Неверный код приглашения';
       }
+
+      const invDoc = invSnap.docs[0];
+      const inv = invDoc.data();
+
+      // Проверка срока действия
+      if (inv.expiresAt && new Date(inv.expiresAt) < new Date()) {
+        await signOut(auth);
+        return err.textContent = 'Код приглашения истёк';
+      }
+
+      // Проверка использования
+      const usedCount = inv.usedCount || 0;
+      const maxUses = inv.maxUses || 1;
+      if (usedCount >= maxUses) {
+        await signOut(auth);
+        return err.textContent = 'Код приглашения исчерпан';
+      }
+
+      // Проверка, что этот пользователь ещё не использовал код
+      const usedByArr = inv.usedBy || [];
+      if (usedByArr.includes(cred.user.uid)) {
+        await signOut(auth);
+        return err.textContent = 'Ты уже использовал этот код';
+      }
+
+      assignedRole = inv.role;
+      inviteUsedId = invDoc.id;
+      inviteCurrent = inv;   // сохраним для обновления
     }
 
     // Проверка лимита только для полицейских
@@ -200,10 +1140,13 @@ async function doRegister() {
     });
 
     // Помечаем код использованным
-    if (inviteUsedId) {
+    if (inviteUsedId && inviteCurrent) {
+      const oldUsedBy = inviteCurrent.usedBy || [];
+      const oldCount = inviteCurrent.usedCount || 0;
       await updateDoc(doc(db,'invites',inviteUsedId), {
-        usedBy: cred.user.uid,
-        usedByNick: nick,
+        usedBy: [...oldUsedBy, cred.user.uid],
+        usedByNicks: [...(inviteCurrent.usedByNicks || []), nick],
+        usedCount: oldCount + 1,
         usedAt: serverTimestamp()
       });
     }
@@ -255,13 +1198,76 @@ function subscribeInvites() {
     if (location.hash === '#/invites') render();
   });
 }
+function subscribeReportsGlobal() {
+  if (reportsGlobalUnsub) reportsGlobalUnsub();
+  reportsGlobalUnsub = onSnapshot(
+    query(collection(db,'reports'), orderBy('createdAt','desc')),
+    snap => {
+      cachedReports = [];
+      snap.forEach(d => cachedReports.push({ id: d.id, ...d.data() }));
+      if (location.hash === '#/dashboard') render();
+    }
+  );
+}
+
+function subscribeDashboardConfig() {
+  if (dashboardConfigUnsub) dashboardConfigUnsub();
+  dashboardConfigUnsub = onSnapshot(doc(db,'config','dashboard'), snap => {
+    dashboardConfig = snap.exists() ? snap.data() : { lastClearAt: null };
+    if (location.hash === '#/dashboard') render();
+  });
+}
+
+async function clearDashboard() {
+  if (!confirm('Очистить статистику дашборда?\n\nЗаписи в базе (отчёты, задержания, штрафы) ОСТАНУТСЯ.\nСчётчики обнулятся и будут считать только новые записи.')) return;
+  await setDoc(doc(db,'config','dashboard'), {
+    lastClearAt: serverTimestamp(),
+    clearedBy: currentProfile.nickname,
+    clearedAt: new Date().toISOString()
+  }, { merge: true });
+  toast('Дашборд очищен');
+}
+
+function subscribeTests() {
+  if (testsUnsub) testsUnsub();
+  testsUnsub = onSnapshot(
+    query(collection(db,'tests'), orderBy('createdAt','desc')),
+    snap => {
+      cachedTests = [];
+      snap.forEach(d => cachedTests.push({ id: d.id, ...d.data() }));
+      // Перерисовываем, если мы на любой странице, связанной с тестами
+      const h = location.hash;
+      if (
+        h === '#/tests' ||
+        h.startsWith('#/test-editor/') ||
+        h.startsWith('#/test-history/') ||
+        h.startsWith('#/test-result/')
+      ) {
+        render();
+      }
+    },
+    err => console.warn('tests listener:', err)
+  );
+}
+
+function subscribeTestResults() {
+  if (testResultsUnsub) testResultsUnsub();
+  testResultsUnsub = onSnapshot(
+    query(collection(db,'testResults'), orderBy('finishedAt','desc')),
+    snap => {
+      cachedTestResults = [];
+      snap.forEach(d => cachedTestResults.push({ id: d.id, ...d.data() }));
+      if (location.hash.startsWith('#/test-results')) render();
+    },
+    err => console.warn('testResults listener:', err)
+  );
+}
 
 /* ==================== ОТЧЁТЫ ==================== */
 async function submitReport() {
   const type = document.getElementById('r-type').value;
   const partnerUid = document.getElementById('r-partner')?.value || '';
   const desc = document.getElementById('r-desc').value.trim();
-  const proof = document.getElementById('r-proof').value.trim();
 
   if (!desc) return toast('Заполни описание','err');
 
@@ -271,22 +1277,41 @@ async function submitReport() {
     if (p) { partnerNick = p.nickname; partnerRank = p.rank; }
   }
 
+  // Загрузка файлов
+  let uploaded = [];
+  const filesToUpload = pendingFiles.reports || [];
+  if (filesToUpload.length > 0) {
+    toast('Загрузка файлов... (' + filesToUpload.length + ')');
+    uploaded = await uploadAllFiles(filesToUpload, 'reports');
+  }
+
   await addDoc(collection(db,'reports'), {
     authorUid: currentUser.uid,
     authorNick: currentProfile.nickname,
     authorRank: currentProfile.rank,
     partnerUid: partnerUid || null,
     partnerNick, partnerRank,
-    type, description: desc, proof,
+    type,
+    description: desc,
+    files: uploaded,
+    tags: selectedReportTags.map(t => t.id),
     status: 'pending',
     reviewComment: '',
     reviewedBy: null,
     reviewedAt: null,
     createdAt: serverTimestamp()
   });
-  toast('Отчёт отправлен');
+
+  // Очистка
+  pendingFiles.reports = [];
+  refreshUploadList('reports');
   document.getElementById('r-desc').value = '';
-  document.getElementById('r-proof').value = '';
+  document.getElementById('r-partner').value = '';
+  selectedReportTags = [];
+  refreshTagsDisplay();
+  clearDraft('reports');
+
+  toast('Отчёт отправлен');
 }
 
 async function reviewReport(id, status) {
@@ -317,17 +1342,38 @@ async function saveUserRole(uid, newRole) {
   if (lvl(newRole) >= lvl(currentProfile.rank) && !isAdmin(currentProfile)) {
     return toast('Нельзя выдать роль выше или равную своей','err');
   }
-  await updateDoc(doc(db,'users',uid), { rank: newRole });
-  toast('Роль обновлена');
+  if (target.rank === newRole) return;
+
+  const historyEntry = {
+    from: target.rank,
+    to: newRole,
+    by: currentProfile.nickname,
+    byRank: currentProfile.rank,
+    at: new Date().toISOString()
+  };
+
+  await updateDoc(doc(db,'users',uid), {
+    rank: newRole,
+    rankHistory: [...(target.rankHistory || []), historyEntry]
+  });
+  toast('Роль обновлена: ' + newRole);
 }
-async function fireUser(uid) {
-  if (!confirm('Уволить сотрудника?')) return;
-  await updateDoc(doc(db,'users',uid), { status: 'fired' });
-  toast('Уволен');
-}
-async function restoreUser(uid) {
-  await updateDoc(doc(db,'users',uid), { status: 'active' });
-  toast('Восстановлен');
+async function setUserStatus(uid, status) {
+  if (!STATUS_LABELS[status]) return toast('Неверный статус','err');
+
+  if (status === 'fired') {
+    if (!confirm('Уволить сотрудника?')) return;
+  } else {
+    const labels = {
+      active: 'вернуть в строй',
+      vacation: 'отправить в отпуск',
+      sick: 'перевести на больничный'
+    };
+    if (!confirm(`Точно ${labels[status]}?`)) return;
+  }
+
+  await updateDoc(doc(db,'users',uid), { status });
+  toast('Статус обновлён: ' + STATUS_LABELS[status].label);
 }
 async function deleteUser(uid) {
   if (!confirm('Удалить профиль? (аккаунт Firebase останется, но не сможет войти)')) return;
@@ -430,6 +1476,244 @@ async function removeWarning(uid, warnId) {
     };
   });
 }
+/* ==================== ОБЪЯВЛЕНИЯ ==================== */
+function subscribeAnnouncements() {
+  if (announcementsUnsub) announcementsUnsub();
+  announcementsUnsub = onSnapshot(
+    query(collection(db,'announcements'), orderBy('createdAt','desc')),
+    snap => {
+      cachedAnnouncements = [];
+      snap.forEach(d => cachedAnnouncements.push({ id: d.id, ...d.data() }));
+      if (location.hash === '#/announcements') render();
+    }
+  );
+}
+
+function openAnnouncementModal(existing) {
+  const isEdit = !!existing;
+
+  // Сбрасываем pendingFiles.announcements
+  pendingFiles.announcements = [];
+
+  // Для режима редактирования — показываем существующие файлы
+  const existingFiles = (isEdit && existing.files) ? existing.files : [];
+  const existingFilesHtml = existingFiles.length ? `
+    <div class="form-group">
+      <label>Загруженные фото</label>
+      <div class="ann-existing-files">
+        ${existingFiles.map(f => `
+          <div class="ann-existing-file" data-existing-url="${escapeHtml(f.url)}">
+            <img src="${escapeHtml(f.url)}" alt="">
+            <button type="button" class="ann-existing-remove" title="Удалить">×</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  openModal(`
+    <h3>${isEdit ? '✏️ Редактировать объявление' : '📢 Новое объявление'}</h3>
+    <div class="form-group">
+      <label>Заголовок</label>
+      <input id="ann-title" type="text" placeholder="Например: Общее собрание" value="${isEdit ? escapeHtml(existing.title) : ''}">
+    </div>
+    <div class="form-group">
+      <label class="label-with-attach">
+        Текст
+        <button type="button" class="attach-btn" data-attach-for="announcements">📎 Прикрепить</button>
+      </label>
+      <textarea id="ann-text" placeholder="Опиши подробно... (можно вставить фото через Ctrl+V)" style="min-height:140px">${isEdit ? escapeHtml(existing.text) : ''}</textarea>
+      <input type="file" multiple accept="image/*"
+             id="upload-input-announcements" style="display:none">
+      <div class="upload-list" id="upload-list-announcements"></div>
+    </div>
+
+    ${existingFilesHtml}
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn" data-confirm>${isEdit ? 'Сохранить' : 'Опубликовать'}</button>
+    </div>
+  `, (overlay, close) => {
+    // Список удалённых существующих файлов
+    const removedExisting = [];
+    overlay.querySelectorAll('.ann-existing-remove').forEach(btn => {
+      btn.onclick = () => {
+        const wrapper = btn.closest('.ann-existing-file');
+        removedExisting.push(wrapper.dataset.existingUrl);
+        wrapper.remove();
+      };
+    });
+
+    // Инициализируем загрузчик
+    initFileUploaders();
+
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const title = overlay.querySelector('#ann-title').value.trim();
+      const text = overlay.querySelector('#ann-text').value.trim();
+      if (!title) return toast('Укажи заголовок','err');
+      if (!text) return toast('Укажи текст','err');
+
+      // Загружаем новые файлы
+      let uploaded = [];
+      if (pendingFiles.announcements.length > 0) {
+        toast('Загрузка фото...');
+        uploaded = await uploadAllFiles(pendingFiles.announcements, 'announcements');
+      }
+
+      // Существующие, которые остались
+      const keptExisting = existingFiles.filter(f => !removedExisting.includes(f.url));
+      const finalFiles = [...keptExisting, ...uploaded];
+
+      if (isEdit) {
+        await updateDoc(doc(db,'announcements',existing.id), {
+          title, text,
+          files: finalFiles,
+          editedAt: new Date().toISOString(),
+          editedBy: currentProfile.nickname
+        });
+        toast('Объявление обновлено');
+      } else {
+        await addDoc(collection(db,'announcements'), {
+          title, text,
+          files: finalFiles,
+          authorUid: currentUser.uid,
+          authorNick: currentProfile.nickname,
+          authorRank: currentProfile.rank,
+          pinned: false,
+          createdAt: serverTimestamp(),
+          editedAt: null,
+          editedBy: null
+        });
+        toast('Объявление опубликовано');
+      }
+
+      pendingFiles.announcements = [];
+      close();
+    };
+  });
+}
+
+async function togglePinAnnouncement(id, currentPinned) {
+  await updateDoc(doc(db,'announcements',id), { pinned: !currentPinned });
+  toast(currentPinned ? 'Откреплено' : 'Закреплено');
+}
+
+async function deleteAnnouncement(id) {
+  if (!confirm('Удалить объявление?')) return;
+  await deleteDoc(doc(db,'announcements',id));
+  toast('Удалено');
+}
+/* ==================== ПООЩРЕНИЯ ==================== */
+function giveAward(uid) {
+  const target = cachedUsers.find(u => u.uid === uid);
+  if (!target) return;
+  if (target.rank === 'Гражданский') {
+    return toast('Нельзя выдать поощрение гражданскому','err');
+  }
+
+  let type = 'thanks';
+  let showAmount = false;
+
+  openModal(`
+    <h3>⭐ Выдать поощрение</h3>
+    <p class="modal-sub">Сотрудник: <strong style="color:var(--accent)">${escapeHtml(target.nickname)}</strong> · ${escapeHtml(target.rank)}</p>
+
+    <div class="form-group">
+      <label>Тип</label>
+      <div class="severity-picker" style="grid-template-columns:1fr 1fr">
+        <button type="button" class="sev-btn active" data-award="thanks">🏅 Благодарность</button>
+        <button type="button" class="sev-btn" data-award="bonus">💰 Премия</button>
+      </div>
+    </div>
+
+    <div class="form-group" id="award-amount-group" style="display:none">
+      <label>Сумма премии (exp)</label>
+      <input id="award-amount" type="number" min="1" placeholder="50000">
+    </div>
+
+    <div class="form-group">
+      <label>Формулировка</label>
+      <textarea id="award-reason" placeholder="Например: за образцовое поведение при задержании..." style="min-height:80px"></textarea>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn" data-confirm>Выдать</button>
+    </div>
+  `, (overlay, close) => {
+    // Переключение типа
+    overlay.querySelectorAll('[data-award]').forEach(btn => {
+      btn.onclick = () => {
+        overlay.querySelectorAll('[data-award]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        type = btn.dataset.award;
+        showAmount = (type === 'bonus');
+        overlay.querySelector('#award-amount-group').style.display = showAmount ? 'block' : 'none';
+      };
+    });
+
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const reason = overlay.querySelector('#award-reason').value.trim();
+      if (!reason) return toast('Укажи формулировку','err');
+
+      let amount = 0;
+      if (showAmount) {
+        amount = parseInt(overlay.querySelector('#award-amount').value, 10);
+        if (!amount || amount < 1) return toast('Укажи сумму премии','err');
+      }
+
+      const award = {
+        id: Date.now().toString(),
+        type,
+        reason,
+        amount,
+        from: currentProfile.nickname,
+        fromRank: currentProfile.rank,
+        date: new Date().toISOString()
+      };
+      await updateDoc(doc(db,'users',uid), { awards: arrayUnion(award) });
+      close();
+      toast(type === 'bonus' ? 'Премия выдана' : 'Благодарность выдана');
+    };
+  });
+}
+
+async function removeAward(uid, awardId) {
+  const u = cachedUsers.find(x => x.uid === uid);
+  if (!u) return;
+
+  const award = (u.awards || []).find(a => a.id === awardId);
+  if (!award) return toast('Поощрение не найдено','err');
+
+  const typeInfo = AWARD_TYPES[award.type];
+  openModal(`
+    <h3>Снять поощрение?</h3>
+    <p class="modal-sub">
+      Сотрудник: <strong style="color:var(--accent)">${escapeHtml(u.nickname)}</strong><br>
+      Тип: <strong>${typeInfo?.label || award.type}</strong>
+      ${award.amount ? `<br>Сумма: <strong>${award.amount.toLocaleString('ru-RU')} exp</strong>` : ''}<br>
+      Формулировка: ${escapeHtml(award.reason)}<br>
+      Выдал: ${escapeHtml(award.from)} · ${fmtDate(award.date)}
+    </p>
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn danger" data-confirm>Снять</button>
+    </div>
+  `, (overlay, close) => {
+    overlay.querySelector('[data-cancel]').onclick = close;
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const newAwards = (u.awards || []).filter(a => a.id !== awardId);
+      await updateDoc(doc(db,'users',uid), { awards: newAwards });
+      close();
+      toast('Поощрение снято');
+    };
+  });
+}
 /* ==================== СБРОС ПАРОЛЕЙ ==================== */
 function subscribeResets() {
   if (resetsUnsub) resetsUnsub();
@@ -497,26 +1781,490 @@ async function deleteReset(id) {
   toast('Удалено');
 }
 /* ==================== ПРИГЛАШЕНИЯ ==================== */
-async function createInvite() {
-  const role = prompt('Какую роль выдаст код? (например: Рядовой, SWAT, Гражданский)', 'Рядовой');
-  if (!role || !ROLES[role]) return toast('Неверная роль','err');
-  if (lvl(role) >= lvl(currentProfile.rank) && !isAdmin(currentProfile)) {
-    return toast('Нельзя создать код на роль выше или равную своей','err');
+function createInvite() {
+  const availableRoles = rolesIAssignViaInvite(currentProfile);
+  if (availableRoles.length === 0) {
+    return toast('У тебя нет права создавать приглашения', 'err');
   }
-  const code = genCode();
-  await addDoc(collection(db,'invites'), {
-    code, role,
-    createdBy: currentUser.uid,
-    createdByNick: currentProfile.nickname,
-    createdAt: serverTimestamp(),
-    usedBy: null, usedByNick: null, usedAt: null
+
+  let selectedRole = availableRoles[0];
+
+  openModal(`
+    <h3>🔑 Новое приглашение</h3>
+    <p class="modal-sub">Создай код для регистрации нового игрока</p>
+
+    <div class="form-group">
+      <label>Роль</label>
+      <select id="inv-role">
+        ${availableRoles.map(r => `<option value="${r}">${r}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Действует (часов)</label>
+      <input id="inv-hours" type="number" min="1" max="168" value="1">
+    </div>
+
+    <div class="form-group">
+      <label>Максимум использований</label>
+      <input id="inv-maxuses" type="number" min="1" max="50" value="5">
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn" data-confirm>Создать</button>
+    </div>
+  `, (overlay, close) => {
+    overlay.querySelector('#inv-role').onchange = e => { selectedRole = e.target.value; };
+
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const role = overlay.querySelector('#inv-role').value;
+      const hours = parseInt(overlay.querySelector('#inv-hours').value, 10);
+      const maxUses = parseInt(overlay.querySelector('#inv-maxuses').value, 10);
+
+      if (!ROLES[role]) return toast('Неверная роль', 'err');
+      if (!hours || hours < 1) return toast('Срок минимум 1 час', 'err');
+      if (!maxUses || maxUses < 1) return toast('Минимум 1 использование', 'err');
+
+      const code = genCode();
+      const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
+
+      await addDoc(collection(db,'invites'), {
+        code,
+        role,
+        expiresAt: expiresAt.toISOString(),
+        maxUses,
+        usedCount: 0,
+        usedBy: [],
+        createdBy: currentUser.uid,
+        createdByNick: currentProfile.nickname,
+        createdByRank: currentProfile.rank,
+        createdAt: serverTimestamp()
+      });
+
+      close();
+      toast('Код создан: ' + code);
+    };
   });
-  toast('Код создан: ' + code);
 }
+
 async function deleteInvite(id) {
-  if (!confirm('Удалить код?')) return;
+  if (!confirm('Удалить приглашение?')) return;
   await deleteDoc(doc(db,'invites',id));
-  toast('Код удалён');
+  toast('Приглашение удалено');
+}
+
+/* ==================== ЗАДЕРЖАНИЯ И ШТРАФЫ ==================== */
+function subscribeDetentions() {
+  if (detentionsUnsub) detentionsUnsub();
+  detentionsUnsub = onSnapshot(
+    query(collection(db,'detentions'), orderBy('createdAt','desc')),
+    snap => {
+      cachedDetentions = [];
+      snap.forEach(d => cachedDetentions.push({ id: d.id, ...d.data() }));
+      if (location.hash === '#/detentions') render();
+    }
+  );
+}
+
+function subscribeFines() {
+  if (finesUnsub) finesUnsub();
+  finesUnsub = onSnapshot(
+    query(collection(db,'fines'), orderBy('createdAt','desc')),
+    snap => {
+      cachedFines = [];
+      snap.forEach(d => cachedFines.push({ id: d.id, ...d.data() }));
+      if (location.hash === '#/fines') render();
+    }
+  );
+}
+
+// ---- Мультивыбор статей ----
+function lawLabel(law) {
+  const stars = law.wantedLevel > 0 ? ' ' + '★'.repeat(law.wantedLevel) : '';
+  return `${law.code} · ${law.title}${stars}`;
+}
+
+function renderArticleSearch(inputId, resultsId, selectedId, stateKey) {
+  const filter = lawTypeFilter[stateKey] || 'all';
+  return `
+    <div class="form-group">
+      <label>Статьи</label>
+      <div class="law-type-tabs">
+        <button type="button" class="law-type-tab ${filter === 'all' ? 'active' : ''}"
+                data-law-type="${stateKey}:all">Все</button>
+        <button type="button" class="law-type-tab ${filter === 'УК' ? 'active' : ''}"
+                data-law-type="${stateKey}:УК">УК</button>
+        <button type="button" class="law-type-tab ${filter === 'АК' ? 'active' : ''}"
+                data-law-type="${stateKey}:АК">АК</button>
+      </div>
+      <div class="law-search-wrap">
+        <input id="${inputId}" type="text" placeholder="Номер статьи или название (например: 17.6 или неповиновение)" autocomplete="off">
+        <button type="button" class="law-search-clear" data-clear-for="${inputId}" title="Очистить">×</button>
+      </div>
+      <div id="${resultsId}" class="law-results"></div>
+      <div id="${selectedId}" class="law-selected"></div>
+      <div id="${selectedId}-summary" class="law-summary"></div>
+    </div>
+  `;
+}
+
+function updateLawResults(inputId, resultsId, stateKey) {
+  const input = document.getElementById(inputId);
+  const box = document.getElementById(resultsId);
+  if (!input || !box) return;
+
+  const q = input.value.trim().toLowerCase();
+  const filter = lawTypeFilter[stateKey] || 'all';
+
+  // Если поиск пуст — ничего не показываем
+  if (!q) { box.innerHTML = ''; return; }
+
+  const current = stateKey === 'detentions' ? selectedArticles : selectedArticlesFine;
+  const matches = LAWS.filter(l => {
+    if (current.some(a => a.code === l.code)) return false;
+    // Фильтр по типу
+    if (filter !== 'all' && l.codeType !== filter) return false;
+    return l.code.toLowerCase().includes(q) ||
+           l.title.toLowerCase().includes(q);
+  }).slice(0, 20);
+
+  if (matches.length === 0) {
+    // Если в выбранном кодексе вообще нет статей — так и говорим
+    const hasAnyInType = LAWS.some(l => filter === 'all' || l.codeType === filter);
+    if (!hasAnyInType && filter !== 'all') {
+      box.innerHTML = `<div class="law-empty">В кодексе ${escapeHtml(filter)} пока нет статей</div>`;
+    } else {
+      box.innerHTML = '<div class="law-empty">Ничего не найдено</div>';
+    }
+    return;
+  }
+
+  box.innerHTML = matches.map(l => `
+    <div class="law-row" data-add="${l.code}">
+      <button type="button" class="law-btn add">+</button>
+      <span class="law-code">${escapeHtml(l.code)}</span>
+      <span class="law-type">${escapeHtml(l.codeType)}</span>
+      <span class="law-title">${escapeHtml(l.title)}</span>
+      ${l.wantedLevel ? `<span class="law-stars">${'★'.repeat(l.wantedLevel)}</span>` : ''}
+    </div>
+  `).join('');
+
+  box.querySelectorAll('[data-add]').forEach(row => {
+    row.onclick = () => addLawToSelection(row.dataset.add, stateKey);
+  });
+}
+
+function addLawToSelection(code, stateKey) {
+  const law = LAWS.find(l => l.code === code);
+  if (!law) return;
+  const arr = stateKey === 'detentions' ? selectedArticles : selectedArticlesFine;
+  if (arr.some(a => a.code === code)) return;
+  arr.push(law);
+  refreshLawSelection(stateKey);
+}
+
+function removeLawFromSelection(code, stateKey) {
+  const arr = stateKey === 'detentions' ? selectedArticles : selectedArticlesFine;
+  const idx = arr.findIndex(a => a.code === code);
+  if (idx >= 0) arr.splice(idx, 1);
+  refreshLawSelection(stateKey);
+}
+
+function refreshLawSelection(stateKey) {
+  const arr = stateKey === 'detentions' ? selectedArticles : selectedArticlesFine;
+  const selId = stateKey === 'detentions' ? 'd-articles-selected' : 'f-articles-selected';
+  const sumId = selId + '-summary';
+  const selBox = document.getElementById(selId);
+  const sumBox = document.getElementById(sumId);
+  if (!selBox) return;
+
+  if (arr.length === 0) {
+    selBox.innerHTML = '<div class="law-empty">Статьи не выбраны</div>';
+    if (sumBox) sumBox.innerHTML = '';
+    return;
+  }
+
+  selBox.innerHTML = `
+    <div class="law-selected-title">Выбрано (${arr.length}):</div>
+    ${arr.map(l => `
+      <div class="law-row selected">
+        <button type="button" class="law-btn remove" data-rm="${l.code}">−</button>
+        <span class="law-code">${escapeHtml(l.code)}</span>
+        <span class="law-type">${escapeHtml(l.codeType)}</span>
+        <span class="law-title">${escapeHtml(l.title)}</span>
+        ${l.wantedLevel ? `<span class="law-stars">${'★'.repeat(l.wantedLevel)}</span>` : ''}
+      </div>
+    `).join('')}
+  `;
+
+  selBox.querySelectorAll('[data-rm]').forEach(row => {
+    row.onclick = () => removeLawFromSelection(row.dataset.rm, stateKey);
+  });
+
+  // Итог
+  if (sumBox) {
+    const totalMonths = arr.reduce((s, l) => s + (l.prisonMonths || 0), 0);
+    const totalFineMin = arr.reduce((s, l) => s + (l.fineMin || 0), 0);
+    const totalFineMax = arr.reduce((s, l) => s + (l.fineMax || 0), 0);
+    const maxWanted = Math.max(...arr.map(l => l.wantedLevel || 0));
+
+    if (stateKey === 'detentions') {
+      // Ограничиваем рекомендуемый срок максимумом
+      const cappedMonths = Math.min(totalMonths, DETENTION_MAX_PRISON_MINUTES);
+      const wasCapped = totalMonths > DETENTION_MAX_PRISON_MINUTES;
+
+      sumBox.innerHTML = `
+        <div class="law-total">
+          ⏱ Рекомендуемый срок: <strong>${cappedMonths} мин</strong>
+          ${wasCapped
+            ? `<span style="color:var(--danger);margin-left:6px">⚠️ по статьям ${totalMonths} мин, ограничено максимумом ${DETENTION_MAX_PRISON_MINUTES}</span>`
+            : `(макс. ${DETENTION_MAX_PRISON_MINUTES})`}
+          ${maxWanted ? ` · Розыск: <strong>${'★'.repeat(maxWanted)}</strong>` : ''}
+        </div>
+      `;
+      // Автоподстановка в поле срока (всегда ограничиваем максимумом)
+      const prisonInput = document.getElementById('d-prison');
+      if (prisonInput && !prisonInput.value) {
+        prisonInput.value = cappedMonths;
+      }
+    } else {
+      sumBox.innerHTML = `
+        <div class="law-total">
+          💰 Штраф: <strong>${totalFineMin.toLocaleString('ru-RU')} – ${totalFineMax.toLocaleString('ru-RU')} exp</strong>
+          ${maxWanted ? ` · Розыск: <strong>${'★'.repeat(maxWanted)}</strong>` : ''}
+        </div>
+      `;
+    }
+  }
+}
+
+// ---- Подача задержания ----
+async function submitDetention() {
+  const target = document.getElementById('d-target').value.trim();
+  const prison = parseInt(document.getElementById('d-prison').value, 10);
+  const partnerUid = document.getElementById('d-partner')?.value || '';
+  const comment = document.getElementById('d-comment').value.trim();
+
+  if (!target) return toast('Укажи ФИО задержанного','err');
+  if (selectedArticles.length === 0) return toast('Выбери хотя бы одну статью','err');
+  if (!prison || prison < 1) {
+    return toast('Срок должен быть не менее 1 минуты','err');
+  }
+  if (prison > DETENTION_MAX_PRISON_MINUTES) {
+    return toast(`Срок не может превышать ${DETENTION_MAX_PRISON_MINUTES} минут`,'err');
+  }
+
+  // Предупреждение, если срок сильно отклоняется от рекомендации
+  const recommended = selectedArticles.reduce((s,l) => s + (l.prisonMonths || 0), 0);
+  if (recommended > 0 && (prison < recommended * 0.5 || prison > recommended * 1.5)) {
+    if (!confirm(`Рекомендуемый срок по статьям: ${recommended} мин.\nТы ставишь ${prison} мин.\nУверен?`)) return;
+  }
+
+  const partners = [];
+  if (partnerUid) {
+    const p = cachedUsers.find(u => u.uid === partnerUid);
+    if (p) partners.push({ uid: p.uid, nickname: p.nickname, rank: p.rank });
+  }
+
+
+  let uploaded = [];
+  if (pendingFiles.detentions.length > 0) {
+    toast('Загрузка файлов...');
+    uploaded = await uploadAllFiles(pendingFiles.detentions, 'detentions');
+  }
+
+  await addDoc(collection(db,'detentions'), {
+    target,
+    articles: selectedArticles.map(l => ({
+      code: l.code, codeType: l.codeType, title: l.title,
+      prisonMonths: l.prisonMonths || 0,
+      wantedLevel: l.wantedLevel || 0
+    })),
+    prisonMinutes: prison,
+    recommendedMinutes: recommended,
+    authorUid: currentUser.uid,
+    authorNick: currentProfile.nickname,
+    authorRank: currentProfile.rank,
+    partners,
+    files: uploaded,
+    comment,
+    status: 'pending',
+    reviewComment: '',
+    reviewedBy: null,
+    reviewedAt: null,
+    releasedEarly: null,
+    edits: [],
+    createdAt: serverTimestamp()
+  });
+
+  toast('Задержание записано');
+  selectedArticles = [];
+  refreshLawSelection('detentions');
+  document.getElementById('d-target').value = '';
+  document.getElementById('d-prison').value = '';
+  document.getElementById('d-comment').value = '';
+  pendingFiles.detentions = [];
+  refreshUploadList('detentions');
+  clearDraft('detentions');
+}
+
+// ---- Подача штрафа ----
+async function submitFine() {
+  const target = document.getElementById('f-target').value.trim();
+  const amount = parseInt(document.getElementById('f-amount').value, 10);
+  const partnerUid = document.getElementById('f-partner')?.value || '';
+  const comment = document.getElementById('f-comment').value.trim();
+
+  if (!target) return toast('Укажи ФИО','err');
+  if (selectedArticlesFine.length === 0) return toast('Выбери статью','err');
+  if (!amount || amount < 1) return toast('Укажи сумму штрафа','err');
+
+  const totalMin = selectedArticlesFine.reduce((s,l) => s + (l.fineMin || 0), 0);
+  const totalMax = selectedArticlesFine.reduce((s,l) => s + (l.fineMax || 0), 0);
+  if (totalMin > 0 && (amount < totalMin || amount > totalMax)) {
+    if (!confirm(`Рекомендуемый штраф: ${totalMin}–${totalMax} exp.\nТы ставишь ${amount} exp.\nУверен?`)) return;
+  }
+
+  const partners = [];
+  if (partnerUid) {
+    const p = cachedUsers.find(u => u.uid === partnerUid);
+    if (p) partners.push({ uid: p.uid, nickname: p.nickname, rank: p.rank });
+  }
+
+  // Загрузка файлов (ДО addDoc!)
+  let uploaded = [];
+  if (pendingFiles.fines.length > 0) {
+    toast('Загрузка файлов...');
+    uploaded = await uploadAllFiles(pendingFiles.fines, 'fines');
+  }
+
+  await addDoc(collection(db,'fines'), {
+    target,
+    articles: selectedArticlesFine.map(l => ({
+      code: l.code, codeType: l.codeType, title: l.title,
+      fineMin: l.fineMin || 0, fineMax: l.fineMax || 0,
+      wantedLevel: l.wantedLevel || 0
+    })),
+    amount,
+    recommendedMin: totalMin,
+    recommendedMax: totalMax,
+    authorUid: currentUser.uid,
+    authorNick: currentProfile.nickname,
+    authorRank: currentProfile.rank,
+    partners,
+    files: uploaded,
+    comment,
+    status: 'pending',
+    reviewComment: '',
+    reviewedBy: null,
+    reviewedAt: null,
+    edits: [],
+    createdAt: serverTimestamp()
+  });
+
+  toast('Штраф записан');
+  selectedArticlesFine = [];
+  refreshLawSelection('fines');
+  document.getElementById('f-target').value = '';
+  document.getElementById('f-amount').value = '';
+  document.getElementById('f-comment').value = '';
+  pendingFiles.fines = [];
+  refreshUploadList('fines');
+  clearDraft('fines');
+}
+
+// ---- Статусы и действия ----
+async function reviewDetention(collectionName, id, status) {
+  const comment = prompt(
+    status === 'accepted' ? 'Комментарий к принятию (необязательно):' : 'Причина отклонения (необязательно):',
+    ''
+  );
+  if (comment === null) return;
+  await updateDoc(doc(db, collectionName, id), {
+    status,
+    reviewComment: comment.trim(),
+    reviewedBy: currentProfile.nickname,
+    reviewedAt: serverTimestamp()
+  });
+  toast(status === 'accepted' ? 'Принято' : 'Отклонено');
+}
+
+async function deleteDetentionRecord(collectionName, id) {
+  if (!confirm('Удалить запись?')) return;
+  await deleteDoc(doc(db, collectionName, id));
+  toast('Удалено');
+}
+
+async function releaseEarly(collectionName, id) {
+  const reason = prompt('Причина досрочного освобождения:', '');
+  if (reason === null) return;
+  await updateDoc(doc(db, collectionName, id), {
+    releasedEarly: {
+      by: currentProfile.nickname,
+      rank: currentProfile.rank,
+      at: new Date().toISOString(),
+      reason: reason.trim() || '—'
+    }
+  });
+  toast('Освобождён досрочно');
+}
+
+// ---- Время: можно ли редактировать автору ----
+function canAuthorEdit(record) {
+  if (!record.createdAt) return false;
+  const ts = record.createdAt.toDate ? record.createdAt.toDate() : new Date(record.createdAt);
+  return (Date.now() - ts.getTime()) < DETENTION_EDIT_HOURS * 3600 * 1000;
+}
+
+function canEditRecord(record) {
+  if (!currentProfile) return false;
+  // Подполковник+ может редактировать всегда
+  if (canEditAnyDetention(currentProfile)) return true;
+  // Автор может, если 36 часов не прошли и запись не принята
+  if (record.authorUid === currentUser.uid &&
+      canAuthorEdit(record) &&
+      record.status !== 'accepted') return true;
+  return false;
+}
+
+async function editDetention(collectionName, id) {
+  const record = (collectionName === 'detentions' ? cachedDetentions : cachedFines)
+    .find(r => r.id === id);
+  if (!record) return;
+
+  const reason = prompt('Причина редактирования (обязательно):', '');
+  if (!reason || !reason.trim()) return toast('Нужна причина','err');
+
+  const fieldName = collectionName === 'detentions' ? 'Срок (мин)' : 'Сумма штрафа (exp)';
+  const currentValue = collectionName === 'detentions' ? record.prisonMinutes : record.amount;
+
+  const newVal = prompt(`${fieldName} (текущее: ${currentValue}):`, String(currentValue));
+  if (newVal === null) return;
+  const numVal = parseInt(newVal, 10);
+  if (!numVal || numVal < 1) return toast('Некорректное значение','err');
+  if (collectionName === 'detentions' && numVal > DETENTION_MAX_PRISON_MINUTES) {
+    return toast(`Максимум ${DETENTION_MAX_PRISON_MINUTES} минут`,'err');
+  }
+
+  const edit = {
+    by: currentProfile.nickname,
+    rank: currentProfile.rank,
+    at: new Date().toISOString(),
+    reason: reason.trim(),
+    changes: collectionName === 'detentions'
+      ? `Срок: ${currentValue} → ${numVal}`
+      : `Штраф: ${currentValue} → ${numVal}`
+  };
+
+  const update = collectionName === 'detentions'
+    ? { prisonMinutes: numVal, edits: [...(record.edits || []), edit] }
+    : { amount: numVal, edits: [...(record.edits || []), edit] };
+
+  await updateDoc(doc(db, collectionName, id), update);
+  toast('Отредактировано');
 }
 
 /* ==================== НАВИГАЦИЯ ==================== */
@@ -538,46 +2286,123 @@ function buildNav() {
     html += `</div>`;
   }
 
-  // Рабочие разделы — только для полиции
-  if (isPolice(currentProfile)) {
+  // Тесты — видны всем (гражданам, полиции, админам)
+  html += `<div class="nav-group">
+    <div class="nav-group-title">Обучение</div>
+    <a class="nav-link" data-route="#/tests">🎓 Тесты</a>
+  </div>`;
+
+  // Рабочие разделы — каждому по его правам
+  const hasWork = isPolice(currentProfile) || canReview(currentProfile) ||
+                  canManageStaff(currentProfile) || canResetPasswords(currentProfile);
+
+  if (hasWork) {
     html += `<div class="nav-group">
-      <div class="nav-group-title">Работа</div>
-      <a class="nav-link" data-route="#/reports">📝 Отчёты</a>
-      <a class="nav-link" data-route="#/tests">🎓 Тесты</a>
-      <a class="nav-link" data-route="#/staff">👮 Кадры</a>`;
-        if (canManageStaff(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/invites">🔑 Приглашения</a>`;
+      <div class="nav-group-title">Работа</div>`;
+
+    if (isPolice(currentProfile) || canReview(currentProfile)) {
+      html += `<a class="nav-link" data-route="#/reports">📝 Отчёты</a>`;
+    }
+            if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
+      html += `<a class="nav-link" data-route="#/registry/detentions">⚖️ Реестр</a>`;
+    }
+    if (isPolice(currentProfile) || canManageStaff(currentProfile)) {
+      html += `<a class="nav-link" data-route="#/staff">👮 Кадры</a>`;
     }
     if (canResetPasswords(currentProfile)) {
       html += `<a class="nav-link" data-route="#/passwords">🔐 Сброс паролей</a>`;
     }
+    if (canManageStaff(currentProfile)) {
+      html += `<a class="nav-link" data-route="#/dashboard">📊 Дашборд</a>`;
+    }
+    if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
+      html += `<a class="nav-link" data-route="#/announcements">📢 Объявления</a>`;
+    }
+
     html += `</div>`;
   }
 
-  // Раздел для начальства не-полиции (губернатор, админы)
-  if (!isPolice(currentProfile) && (canReview(currentProfile) || canManageStaff(currentProfile))) {
-    html += `<div class="nav-group">
-      <div class="nav-group-title">Работа</div>
-      <a class="nav-link" data-route="#/reports">📝 Отчёты</a>
-      <a class="nav-link" data-route="#/staff">👮 Кадры</a>`;
-    if (canManageStaff(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/invites">🔑 Приглашения</a>`;
-    }
-    html += `</div>`;
-  }
+    // Мобильная кнопка «Выйти» внизу меню
+  html += `
+    <div class="nav-group nav-logout-group">
+      <button class="btn secondary nav-logout-btn" id="navLogout">🚪 Выйти</button>
+    </div>
+  `;
 
   nav.innerHTML = html;
   nav.querySelectorAll('.nav-link').forEach(l => {
     l.onclick = () => { location.hash = l.dataset.route; };
+  });
+
+  document.getElementById('navLogout')?.addEventListener('click', () => {
+    document.getElementById('btnLogout')?.click();
   });
 }
 
 /* ==================== ОТРИСОВКА ==================== */
 function renderHome() {
   const warnings = currentProfile.warnings || [];
+  const p = currentProfile;
+
+  // Собираем карточки по тем же правилам, что и меню
+  const cards = [];
+
+  // Общие — для всех
+  cards.push(`
+    <div class="card" onclick="location.hash='#/doc/ustav'">
+      <h4>📕 Устав</h4><p>Права и обязанности сотрудников.</p>
+    </div>
+    <div class="card" onclick="location.hash='#/doc/uk'">
+      <h4>⚖️ Уголовный Кодекс</h4><p>Преступления и наказания.</p>
+    </div>
+  `);
+
+  // Тесты — всем
+  cards.push(`
+    <div class="card" onclick="location.hash='#/tests'">
+      <h4>🎓 Тесты</h4><p>Проверь знание устава.</p>
+    </div>
+  `);
+
+  // Отчёты — полиции и тем, кто может проверять
+  if (isPolice(p) || canReview(p)) {
+    cards.push(`
+      <div class="card" onclick="location.hash='#/reports'">
+        <h4>📝 Отчёты</h4><p>Сдать рапорт или просмотреть общие.</p>
+      </div>
+    `);
+  }
+
+  // Кадры — полиции и тем, кто может управлять
+  if (isPolice(p) || canManageStaff(p)) {
+    cards.push(`
+      <div class="card" onclick="location.hash='#/staff'">
+        <h4>👮 Кадры</h4><p>Состав фракции и управление.</p>
+      </div>
+    `);
+  }
+
+  // Приглашения
+  if (canManageStaff(p)) {
+    cards.push(`
+      <div class="card" onclick="location.hash='#/invites'">
+        <h4>🔑 Приглашения</h4><p>Коды для регистрации новичков.</p>
+      </div>
+    `);
+  }
+
+  // Сброс паролей
+  if (canResetPasswords(p)) {
+    cards.push(`
+      <div class="card" onclick="location.hash='#/passwords'">
+        <h4>🔐 Сброс паролей</h4><p>Запросы на восстановление доступа.</p>
+      </div>
+    `);
+  }
+
   return `
-    <h2>Добро пожаловать, ${escapeHtml(currentProfile.nickname)}</h2>
-    <p class="doc-meta">Твоя роль: <strong style="color:var(--accent)">${escapeHtml(currentProfile.rank)}</strong></p>
+    <h2>Добро пожаловать, ${escapeHtml(p.nickname)}</h2>
+    <p class="doc-meta">Твоя роль: <strong style="color:var(--accent)">${escapeHtml(p.rank)}</strong></p>
 
     ${warnings.length ? `
       <div class="warnings-box">
@@ -591,18 +2416,7 @@ function renderHome() {
       </div>
     ` : ''}
 
-    <div class="cards">
-      <div class="card" onclick="location.hash='#/doc/ustav'">
-        <h4>📕 Устав</h4><p>Права и обязанности сотрудников.</p></div>
-      <div class="card" onclick="location.hash='#/doc/uk'">
-        <h4>⚖️ Уголовный Кодекс</h4><p>Преступления и наказания.</p></div>
-      ${isPolice(currentProfile) ? `
-        <div class="card" onclick="location.hash='#/reports'">
-          <h4>📝 Отчёты</h4><p>Сдать рапорт или просмотреть общие.</p></div>
-        <div class="card" onclick="location.hash='#/tests'">
-          <h4>🎓 Тесты</h4><p>Проверь знание устава.</p></div>
-      ` : ''}
-    </div>
+    <div class="cards">${cards.join('')}</div>
   `;
 }
 
@@ -628,15 +2442,29 @@ function renderReports() {
       </select></div>
     <div class="form-group"><label>С кем был патруль</label>
       <select id="r-partner"><option value="">— Один / не указано —</option></select></div>
-    <div class="form-group"><label>Описание</label>
-      <textarea id="r-desc" placeholder="Что произошло..."></textarea></div>
-    <div class="form-group"><label>Доказательства (ссылка)</label>
-      <input id="r-proof" type="text" placeholder="https://..."></div>
+
+    <div class="form-group">
+      <label class="label-with-attach">
+        Описание
+        <button type="button" class="attach-btn" data-attach-for="reports">📎 Прикрепить</button>
+      </label>
+      <textarea id="r-desc" placeholder="Что произошло... (можно вставить фото через Ctrl+V)"></textarea>
+      <input type="file" multiple accept="image/*,video/*,application/pdf"
+             id="upload-input-reports" style="display:none">
+      <div class="upload-list" id="upload-list-reports"></div>
+    </div>
+
+    ${renderTagPicker()}
+
+    ${renderDraftIndicator('reports')}
     <button class="btn" id="btnSubmitReport">Отправить отчёт</button>
   ` : '';
 
   setTimeout(() => {
     document.getElementById('btnSubmitReport')?.addEventListener('click', submitReport);
+    initFileUploaders();
+    initTagPicker();
+
     const pSel = document.getElementById('r-partner');
     if (pSel) {
       const opts = ['<option value="">— Один / не указано —</option>'];
@@ -648,6 +2476,21 @@ function renderReports() {
       });
       pSel.innerHTML = opts.join('');
     }
+
+    initDraft('reports', {
+      'r-type': 'type',
+      'r-partner': 'partner',
+      'r-desc': 'desc'
+    });
+
+    // Восстанавливаем теги из черновика
+    const draft = loadDraft('reports');
+    if (draft && draft.tags && Array.isArray(draft.tags)) {
+      selectedReportTags = draft.tags
+        .map(id => REPORT_TAGS.find(t => t.id === id))
+        .filter(Boolean);
+      refreshTagsDisplay();
+    }
   }, 0);
 
   if (reportsUnsub) reportsUnsub();
@@ -658,36 +2501,73 @@ function renderReports() {
     const box = document.getElementById('reportsList');
     if (!box) return;
 
-    const visible = reports.filter(r =>
-      canReview(currentProfile) || r.authorUid === currentUser.uid
+    let visible = reports.filter(r =>
+      canReview(currentProfile) ||
+      canManageStaff(currentProfile) ||
+      r.authorUid === currentUser.uid ||
+      r.partnerUid === currentUser.uid
     );
 
+    // Фильтр по тегам (множественный)
+    if (activeTagFilters.length > 0) {
+      visible = visible.filter(r =>
+        Array.isArray(r.tags) && r.tags.some(t => activeTagFilters.includes(t))
+      );
+    }
+
+    // Сортировка: закреплённые сверху, потом по дате
+    visible.sort((a, b) => {
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      const ta = a.createdAt?.toDate?.() || new Date(a.createdAt || 0);
+      const tb = b.createdAt?.toDate?.() || new Date(b.createdAt || 0);
+      return tb - ta;
+    });
+
+    const filterBar = renderTagFilterBar();
+
     if (visible.length === 0) {
-      box.innerHTML = '<p class="doc-meta">Отчётов пока нет.</p>';
+      box.innerHTML = `
+        ${filterBar}
+        <p class="doc-meta">
+          ${activeTagFilters.length > 0
+            ? 'По выбранным тегам отчётов не найдено. Нажми «Все», чтобы сбросить фильтр.'
+            : 'Отчётов пока нет.'}
+        </p>
+      `;
+      initTagFilterBar();
       return;
     }
 
-    box.innerHTML = `<h3 style="color:var(--accent);margin-bottom:14px">Список отчётов (${visible.length})</h3>` +
+    box.innerHTML = `<h3 style="color:var(--accent);margin-bottom:14px">Список отчётов (${visible.length})</h3>
+      ${filterBar}` +
       visible.map(r => {
         const cls = 'report-card status-' + r.status;
         const canDel = canDelReports(currentProfile);
         const canRev = canReview(currentProfile);
-        const actions = (canRev || canDel) ? `
+        const canPin = canTogglePin(r);
+        const actions = (canRev || canDel || canPin) ? `
           <div class="report-actions">
             ${canRev && r.status !== 'accepted' ? `<button class="btn" data-act="accepted" data-id="${r.id}">✓ Принять</button>` : ''}
             ${canRev && r.status !== 'rejected' ? `<button class="btn danger" data-act="rejected" data-id="${r.id}">✗ Отклонить</button>` : ''}
+            ${canPin ? `<button class="btn secondary" data-act="pin" data-id="${r.id}" data-pinned="${!!r.pinned}">${r.pinned ? '📌 Открепить' : '📌 Закрепить'}</button>` : ''}
             ${canDel ? `<button class="btn secondary" data-act="del" data-id="${r.id}">🗑 Удалить</button>` : ''}
           </div>` : '';
 
-        return `<div class="${cls}">
+        const pinnedClass = r.pinned ? ' pinned' : '';
+        return `<div class="${cls}${pinnedClass}">
           <div class="report-head">
-            <div class="report-author">${escapeHtml(r.authorNick)}<span class="rank">${escapeHtml(r.authorRank)}</span></div>
+            <div class="report-author">
+              ${r.pinned ? '<span class="pin-icon" title="Закреплён">📌</span> ' : ''}
+              ${escapeHtml(r.authorNick)}<span class="rank">${escapeHtml(r.authorRank)}</span>
+            </div>
             <div class="report-date">${fmtDate(r.createdAt)}</div>
           </div>
           <div class="report-type">${escapeHtml(r.type)} · ${statusLabel(r.status)}</div>
           ${r.partnerNick ? `<div class="report-type" style="background:#1a2338;color:var(--accent)">👥 С кем: ${escapeHtml(r.partnerNick)} — ${escapeHtml(r.partnerRank || '')}</div>` : ''}
+          ${renderReportTags(r.tags)}
           <div class="report-desc">${escapeHtml(r.description)}</div>
-          ${r.proof ? `<div class="report-proof">📎 <a href="${escapeHtml(r.proof)}" target="_blank" rel="noopener">Доказательства</a></div>` : ''}
+          ${renderAttachments(r.files)}
           ${r.reviewComment ? `<div class="report-comment">💬 <strong>${escapeHtml(r.reviewedBy || '')}:</strong> ${escapeHtml(r.reviewComment)}</div>` : ''}
           ${actions}
         </div>`;
@@ -696,19 +2576,535 @@ function renderReports() {
     box.querySelectorAll('[data-act]').forEach(btn => {
       btn.onclick = () => {
         const id = btn.dataset.id, act = btn.dataset.act;
-        if (act === 'del') deleteReport(id);
-        else reviewReport(id, act);
+        if (act === 'del')       deleteReport(id);
+        else if (act === 'pin')  togglePinReport(id, btn.dataset.pinned === 'true');
+        else                     reviewReport(id, act);
       };
     });
+
+    initTagFilterBar();
   });
 
   return `<h2>Отчёты сотрудников</h2>
-    <p class="doc-meta">${canReview(currentProfile) ? 'Ты видишь все отчёты и можешь их проверять' : 'Ты видишь только свои отчёты'}</p>
+    <p class="doc-meta">${
+      canReview(currentProfile)
+        ? 'Ты видишь все отчёты и можешь их проверять'
+        : 'Ты видишь свои отчёты и те, где ты был напарником'
+    }</p>
     ${canSubmit ? `<h3 style="color:var(--accent);margin:20px 0 12px">Подать новый</h3>${form}` : ''}
     <div id="reportsList" style="margin-top:24px"><p class="doc-meta">Загрузка...</p></div>`;
 }
 function statusLabel(s) {
   return {pending:'На рассмотрении',accepted:'Принят',rejected:'Отклонён'}[s] || s;
+}
+
+/* ==================== ПРОФИЛЬ СОТРУДНИКА ==================== */
+/* ==================== ДАШБОРД ==================== */
+function renderDashboard() {
+  if (!canManageStaff(currentProfile)) return `<h2>Доступ запрещён</h2>`;
+
+  const now = Date.now();
+  const periodMs = dashPeriod === 'week' ? 7*24*3600*1000 : 30*24*3600*1000;
+  const periodStart = now - periodMs;
+
+  // Учитываем метку последней очистки
+  let clearTs = 0;
+  if (dashboardConfig.lastClearAt) {
+    clearTs = dashboardConfig.lastClearAt.toDate
+      ? dashboardConfig.lastClearAt.toDate().getTime()
+      : new Date(dashboardConfig.lastClearAt).getTime();
+  }
+  const cutoff = Math.max(periodStart, clearTs);
+
+  const toMs = r => r.createdAt?.toDate ? r.createdAt.toDate().getTime() : new Date(r.createdAt || 0).getTime();
+  const inPeriod = r => toMs(r) >= cutoff;
+
+  const reportsIn    = cachedReports.filter(inPeriod);
+  const detentionsIn = cachedDetentions.filter(inPeriod);
+  const finesIn      = cachedFines.filter(inPeriod);
+
+  // Активные полицейские (без гражданских и уволенных)
+  const policeActive = cachedUsers.filter(u => isPolice(u) && u.status === 'active').length;
+  const policeTotal  = cachedUsers.filter(u => isPolice(u) && u.status !== 'fired').length;
+
+  // Статистика по сотрудникам (без уволенных и гражданских)
+  const stats = {};
+  cachedUsers.forEach(u => {
+    if (u.status === 'fired' || !isPolice(u)) return;
+    stats[u.uid] = { user: u, reports: 0, detentions: 0, fines: 0, total: 0 };
+  });
+  reportsIn.forEach(r => { if (stats[r.authorUid]) { stats[r.authorUid].reports++; stats[r.authorUid].total++; } });
+  detentionsIn.forEach(d => { if (stats[d.authorUid]) { stats[d.authorUid].detentions++; stats[d.authorUid].total++; } });
+  finesIn.forEach(f => { if (stats[f.authorUid]) { stats[f.authorUid].fines++; stats[f.authorUid].total++; } });
+
+  const top5 = Object.values(stats).filter(s => s.total > 0)
+    .sort((a,b) => b.total - a.total).slice(0, 5);
+
+  // С выговорами (без уволенных)
+  const withWarnings = cachedUsers
+    .filter(u => u.status !== 'fired' && isPolice(u) && (u.warnings || []).length > 0)
+    .sort((a,b) => (b.warnings.length) - (a.warnings.length));
+
+  // С поощрениями (без уволенных) — за выбранный период
+  const awardsByUser = cachedUsers
+    .filter(u => u.status !== 'fired' && isPolice(u) && (u.awards || []).length > 0)
+    .map(u => {
+      const awardsInPeriod = (u.awards || []).filter(a => {
+        const t = new Date(a.date).getTime();
+        return t >= cutoff;
+      });
+      return { user: u, count: awardsInPeriod.length, all: u.awards || [] };
+    })
+    .filter(x => x.count > 0)
+    .sort((a,b) => b.count - a.count);
+
+  // В отпуске / больничном
+  const onLeave = cachedUsers.filter(u =>
+    isPolice(u) && (u.status === 'vacation' || u.status === 'sick')
+  );
+
+  // График активности по дням
+  const daysCount = dashPeriod === 'week' ? 7 : 30;
+  const days = [];
+  for (let i = daysCount - 1; i >= 0; i--) {
+    const dayStart = new Date();
+    dayStart.setHours(0,0,0,0);
+    dayStart.setDate(dayStart.getDate() - i);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+
+    const dayStartMs = Math.max(dayStart.getTime(), cutoff);
+    const dayEndMs = dayEnd.getTime();
+
+    let count = 0;
+    const countIn = arr => arr.forEach(r => {
+      const t = toMs(r);
+      if (t >= dayStartMs && t < dayEndMs) count++;
+    });
+    countIn(cachedReports);
+    countIn(cachedDetentions);
+    countIn(cachedFines);
+
+    const label = dayStart.toLocaleDateString('ru-RU',
+      dashPeriod === 'week'
+        ? { weekday:'short', day:'2-digit' }
+        : { day:'2-digit' });
+    days.push({ label, count });
+  }
+  const maxDay = Math.max(1, ...days.map(d => d.count));
+
+  // Рендер
+  const lastClear = dashboardConfig.clearedAt
+    ? `<div class="dash-clear-info">Последняя очистка: ${fmtDate(dashboardConfig.clearedAt)} — ${escapeHtml(dashboardConfig.clearedBy || '')}</div>`
+    : '';
+
+  return `
+    <h2>📊 Дашборд</h2>
+    <p class="doc-meta">Аналитика по фракции — только для Полковника и выше</p>
+
+    <div class="dash-toolbar">
+      <div class="dash-period">
+        <button class="dash-period-btn ${dashPeriod === 'week' ? 'active' : ''}" data-period="week">7 дней</button>
+        <button class="dash-period-btn ${dashPeriod === 'month' ? 'active' : ''}" data-period="month">30 дней</button>
+      </div>
+      ${lvl(currentProfile.rank) >= 14 ? `<button class="btn danger" id="btnClearDash">🗑 Очистить статистику</button>` : ''}
+    </div>
+    ${lastClear}
+
+    <div class="dash-tiles">
+      <div class="dash-tile">
+        <div class="dash-tile-num">${reportsIn.length}</div>
+        <div class="dash-tile-lbl">📝 Отчётов</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-tile-num">${detentionsIn.length}</div>
+        <div class="dash-tile-lbl">📋 Задержаний</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-tile-num">${finesIn.length}</div>
+        <div class="dash-tile-lbl">💰 Штрафов</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-tile-num">${policeActive} <span style="font-size:14px;color:var(--muted)">/ ${policeTotal}</span></div>
+        <div class="dash-tile-lbl">👮 Активных</div>
+      </div>
+    </div>
+
+    <h3 class="profile-section-title">🏆 Топ-5 активных</h3>
+    ${top5.length === 0 ? '<p class="doc-meta">Нет активности за период.</p>' : `
+      <div class="dash-top">
+        ${top5.map((s, i) => `
+          <div class="dash-top-row" onclick="location.hash='#/profile/${s.user.uid}'" style="cursor:pointer">
+            <div class="dash-top-place">${i+1}</div>
+            <div class="dash-top-info">
+              <div class="dash-top-name">${escapeHtml(s.user.nickname)}</div>
+              <div class="dash-top-rank">${escapeHtml(s.user.rank)}</div>
+            </div>
+            <div class="dash-top-stats">
+              <span title="Отчёты">📝 ${s.reports}</span>
+              <span title="Задержания">📋 ${s.detentions}</span>
+              <span title="Штрафы">💰 ${s.fines}</span>
+            </div>
+            <div class="dash-top-total">${s.total}</div>
+          </div>
+        `).join('')}
+      </div>
+    `}
+
+    <h3 class="profile-section-title">📈 Активность по дням</h3>
+    <div class="dash-chart">
+      ${days.map(d => `
+        <div class="dash-bar-wrap" title="${d.label}: ${d.count}">
+          <div class="dash-bar-count">${d.count || ''}</div>
+          <div class="dash-bar" style="height:${Math.max(2, (d.count / maxDay) * 100)}%"></div>
+          <div class="dash-bar-label">${d.label}</div>
+        </div>
+      `).join('')}
+    </div>
+
+    <h3 class="profile-section-title">🏆 Поощрения за период (${awardsByUser.length})</h3>
+    ${awardsByUser.length === 0 ? '<p class="doc-meta">За этот период никого не поощряли.</p>' : `
+      <div class="dash-list">
+        ${awardsByUser.map(x => {
+          const totalExp = x.all.reduce((s, a) => s + (a.amount || 0), 0);
+          return `<div class="dash-list-row" onclick="location.hash='#/profile/${x.user.uid}'" style="cursor:pointer">
+            <div class="dash-list-name">${escapeHtml(x.user.nickname)} <span class="dash-list-rank">${escapeHtml(x.user.rank)}</span></div>
+            <div class="dash-list-val" style="color:var(--ok)">
+              ⭐ ${x.count}${totalExp ? ` <span style="font-size:11px;color:var(--muted)">(${totalExp.toLocaleString('ru-RU')} exp)</span>` : ''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    `}
+
+    <h3 class="profile-section-title">⚠️ Сотрудники с выговорами (${withWarnings.length})</h3>
+    ${withWarnings.length === 0 ? '<p class="doc-meta">Все чисто.</p>' : `
+      <div class="dash-list">
+        ${withWarnings.map(u => {
+          const heavy = (u.warnings || []).filter(w => w.severity === 'heavy').length;
+          return `<div class="dash-list-row" onclick="location.hash='#/profile/${u.uid}'" style="cursor:pointer">
+            <div class="dash-list-name">${escapeHtml(u.nickname)} <span class="dash-list-rank">${escapeHtml(u.rank)}</span></div>
+            <div class="dash-list-val" style="color:var(--danger)">
+              ⚠️ ${u.warnings.length}${heavy ? ` <span style="font-size:11px">(тяжёлых: ${heavy})</span>` : ''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    `}
+
+    <h3 class="profile-section-title">🌴 В отпуске / на больничном (${onLeave.length})</h3>
+    ${onLeave.length === 0 ? '<p class="doc-meta">Все на месте.</p>' : `
+      <div class="dash-list">
+        ${onLeave.map(u => {
+          const info = STATUS_LABELS[u.status];
+          return `<div class="dash-list-row" onclick="location.hash='#/profile/${u.uid}'" style="cursor:pointer">
+            <div class="dash-list-name">${escapeHtml(u.nickname)} <span class="dash-list-rank">${escapeHtml(u.rank)}</span></div>
+            <div class="dash-list-val" style="color:${info.color}">${info.label}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    `}
+  `;
+}
+
+// Обработчики дашборда
+document.addEventListener('click', e => {
+  const periodBtn = e.target.closest('[data-period]');
+  if (periodBtn) {
+    dashPeriod = periodBtn.dataset.period;
+    render();
+  }
+  if (e.target.id === 'btnClearDash') {
+    clearDashboard();
+  }
+});
+
+/* ==================== ДОСКА ОБЪЯВЛЕНИЙ ==================== */
+function renderAnnouncements() {
+  // Доступ: только полиция + начальство
+  if (!isPolice(currentProfile) && !canReview(currentProfile) && !canManageStaff(currentProfile)) {
+    return `<h2>Доступ запрещён</h2>`;
+  }
+
+  const canCreate = canCreateAnnouncements(currentProfile);
+  const canPin = canPinAnnouncements(currentProfile);
+
+  // Сортировка: закреплённые сверху
+  const sorted = [...cachedAnnouncements].sort((a,b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    const ta = a.createdAt?.toDate?.() || new Date(a.createdAt || 0);
+    const tb = b.createdAt?.toDate?.() || new Date(b.createdAt || 0);
+    return tb - ta;
+  });
+
+  const cardsHtml = sorted.map(a => {
+    const isAuthor = a.authorUid === currentUser.uid;
+    const canEdit = isAuthor;
+    const canDelete = isAuthor || canPin;
+    return `
+      <div class="ann-card ${a.pinned ? 'pinned' : ''}">
+        <div class="ann-head">
+          <div class="ann-title">
+            ${a.pinned ? '<span class="ann-pin">📌</span>' : ''}
+            ${escapeHtml(a.title)}
+          </div>
+          <div class="ann-date">${fmtDate(a.createdAt)}</div>
+        </div>
+        <div class="ann-text">${escapeHtml(a.text)}</div>
+        ${(a.files && a.files.length) ? `
+          <div class="ann-gallery">
+            ${a.files.map(f => `
+              <a href="${escapeHtml(f.url)}" target="_blank" class="ann-gallery-item" rel="noopener">
+                <img src="${escapeHtml(f.url)}" alt="" loading="lazy">
+              </a>
+            `).join('')}
+          </div>
+        ` : ''}
+        <div class="ann-foot">
+          <div class="ann-author">
+            ${escapeHtml(a.authorNick)} <span class="ann-rank">${escapeHtml(a.authorRank)}</span>
+            ${a.editedAt ? `<span class="ann-edited">· ред. ${escapeHtml(a.editedBy || '')} ${fmtDate(a.editedAt)}</span>` : ''}
+          </div>
+          <div class="ann-actions">
+            ${canPin ? `<button class="btn tiny secondary" data-pin="${a.id}" data-pinned="${a.pinned}">${a.pinned ? '📌 Открепить' : '📌 Закрепить'}</button>` : ''}
+            ${canEdit ? `<button class="btn tiny secondary" data-edit-ann="${a.id}">✏️ Ред.</button>` : ''}
+            ${canDelete ? `<button class="btn tiny danger" data-del-ann="${a.id}">🗑</button>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  setTimeout(() => {
+    document.getElementById('btnNewAnn')?.addEventListener('click', () => openAnnouncementModal(null));
+
+    document.querySelectorAll('[data-pin]').forEach(b => {
+      b.onclick = () => togglePinAnnouncement(b.dataset.pin, b.dataset.pinned === 'true');
+    });
+    document.querySelectorAll('[data-edit-ann]').forEach(b => {
+      b.onclick = () => {
+        const ann = cachedAnnouncements.find(a => a.id === b.dataset.editAnn);
+        if (ann) openAnnouncementModal(ann);
+      };
+    });
+    document.querySelectorAll('[data-del-ann]').forEach(b => {
+      b.onclick = () => deleteAnnouncement(b.dataset.delAnn);
+    });
+  }, 0);
+
+  return `
+    <h2>📢 Доска объявлений</h2>
+    <p class="doc-meta">Внутренние объявления для сотрудников фракции</p>
+
+    ${canCreate ? `<button class="btn" id="btnNewAnn" style="margin-bottom:20px">+ Новое объявление</button>` : ''}
+
+    ${sorted.length === 0
+      ? '<p class="doc-meta">Объявлений пока нет.</p>'
+      : cardsHtml}
+  `;
+}
+
+function renderProfile(uid) {
+  // Возвращаем заглушку, потом подгрузим данные
+  setTimeout(async () => {
+    const container = document.getElementById('profileContainer');
+    if (!container) return;
+
+    const profile = cachedUsers.find(u => u.uid === uid) || await loadProfile(uid);
+    if (!profile) {
+      container.innerHTML = '<h2>Сотрудник не найден</h2>';
+      return;
+    }
+
+    // Загружаем статистику
+    try {
+      const [reports, detentions, fines] = await Promise.all([
+        getDocs(query(collection(db,'reports'),  where('authorUid','==',uid))),
+        getDocs(query(collection(db,'detentions'), where('authorUid','==',uid))),
+        getDocs(query(collection(db,'fines'),    where('authorUid','==',uid)))
+      ]);
+
+      // Последние записи (сортируем на клиенте)
+      const sortByDate = arr => arr.sort((a,b) => {
+        const ta = a.createdAt?.toDate?.() || new Date(a.createdAt || 0);
+        const tb = b.createdAt?.toDate?.() || new Date(b.createdAt || 0);
+        return tb - ta;
+      });
+
+      const allReports   = reports.docs.map(d => ({ id: d.id, ...d.data() }));
+      const allDetentions= detentions.docs.map(d => ({ id: d.id, ...d.data() }));
+      const allFines     = fines.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      sortByDate(allReports);
+      sortByDate(allDetentions);
+      sortByDate(allFines);
+
+      const lastReports    = allReports.slice(0, 5);
+      const lastDetentions = allDetentions.slice(0, 5);
+      const lastFines      = allFines.slice(0, 5);
+
+      const totalFinesSum = allFines.reduce((s, f) => s + (f.amount || 0), 0);
+      const warnings = profile.warnings || [];
+      const rankHistory = profile.rankHistory || [];
+
+      const statusInfo = STATUS_LABELS[profile.status] || { label: profile.status, color: '#888' };
+
+      const statBlock = `
+        <div class="profile-stats">
+          <div class="stat-card">
+            <div class="stat-num">${allReports.length}</div>
+            <div class="stat-lbl">Отчётов</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">${allDetentions.length}</div>
+            <div class="stat-lbl">Задержаний</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">${allFines.length}</div>
+            <div class="stat-lbl">Штрафов</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">${totalFinesSum.toLocaleString('ru-RU')}</div>
+            <div class="stat-lbl">exp штрафов</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num" style="color:${warnings.length ? 'var(--danger)' : 'var(--ok)'}">${warnings.length}</div>
+            <div class="stat-lbl">Выговоров</div>
+          </div>
+        </div>
+      `;
+
+      const renderMiniReport = r => `
+        <div class="profile-mini status-${r.status}">
+          <div class="profile-mini-head">
+            <span>${escapeHtml(r.type || 'Отчёт')}</span>
+            <span class="profile-mini-date">${fmtDate(r.createdAt)}</span>
+          </div>
+          <div class="profile-mini-body">${escapeHtml((r.description || '').slice(0, 100))}${(r.description || '').length > 100 ? '…' : ''}</div>
+          <div class="profile-mini-status status-${r.status}">${statusLabel(r.status)}</div>
+        </div>
+      `;
+
+      const renderMiniDetention = d => `
+        <div class="profile-mini status-${d.status}">
+          <div class="profile-mini-head">
+            <span>👤 ${escapeHtml(d.target || '—')}</span>
+            <span class="profile-mini-date">${fmtDate(d.createdAt)}</span>
+          </div>
+          <div class="profile-mini-body">
+            ${(d.articles || []).map(a => `<span class="law-chip" style="font-size:10px">${escapeHtml(a.code)}</span>`).join(' ')}
+            · ⏱ ${d.prisonMinutes || 0} мин
+          </div>
+          <div class="profile-mini-status status-${d.status}">${statusLabel(d.status)}</div>
+        </div>
+      `;
+
+      const renderMiniFine = f => `
+        <div class="profile-mini status-${f.status}">
+          <div class="profile-mini-head">
+            <span>👤 ${escapeHtml(f.target || '—')}</span>
+            <span class="profile-mini-date">${fmtDate(f.createdAt)}</span>
+          </div>
+          <div class="profile-mini-body">
+            💰 ${Number(f.amount || 0).toLocaleString('ru-RU')} exp
+            ${(f.articles || []).map(a => `<span class="law-chip" style="font-size:10px">${escapeHtml(a.code)}</span>`).join(' ')}
+          </div>
+          <div class="profile-mini-status status-${f.status}">${statusLabel(f.status)}</div>
+        </div>
+      `;
+
+      const rankHistoryHtml = rankHistory.length ? `
+        <h3 class="profile-section-title">🎖 История повышений</h3>
+        <div class="profile-history">
+          ${rankHistory.slice().reverse().map(h => `
+            <div class="history-item">
+              <div class="history-main">
+                <strong>${escapeHtml(h.from)}</strong>
+                <span style="color:var(--accent)">→</span>
+                <strong style="color:var(--accent)">${escapeHtml(h.to)}</strong>
+              </div>
+              <div class="history-meta">
+                ${fmtDate(h.at)} — ${escapeHtml(h.by)} (${escapeHtml(h.byRank || '')})
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : '';
+
+      const awards = profile.awards || [];
+      const awardsHtml = awards.length ? `
+        <h3 class="profile-section-title">⭐ Поощрения (${awards.length})</h3>
+        <div class="profile-awards">
+          ${awards.slice().reverse().map(a => {
+            const info = AWARD_TYPES[a.type] || { label: a.type, color: '#888' };
+            return `
+              <div class="award-item" style="border-left-color:${info.color}">
+                <div class="award-head">
+                  <strong style="color:${info.color}">${info.label}${a.amount ? ` · ${a.amount.toLocaleString('ru-RU')} exp` : ''}</strong>
+                  <span class="award-date">${fmtDate(a.date)}</span>
+                </div>
+                <div class="award-reason">${escapeHtml(a.reason)}</div>
+                <div class="award-meta">Выдал: ${escapeHtml(a.from)} (${escapeHtml(a.fromRank || '')})</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      ` : '';
+      
+      const warningsHtml = warnings.length ? `
+        <h3 class="profile-section-title">⚠️ Выговоры</h3>
+        <div class="profile-warnings">
+          ${warnings.map(w => `
+            <div class="warning-item" style="border-left-color:${WARNING_LEVELS[w.severity]?.color}">
+              <div><strong>${WARNING_LEVELS[w.severity]?.label}</strong> · от ${escapeHtml(w.from)} · ${fmtDate(w.date)}</div>
+              <div style="color:var(--muted);margin-top:4px">${escapeHtml(w.reason)}</div>
+            </div>
+          `).join('')}
+        </div>
+      ` : '';
+
+      container.innerHTML = `
+        <div class="profile-hero">
+          <div class="profile-avatar">${escapeHtml(profile.nickname.charAt(0).toUpperCase())}</div>
+          <div class="profile-info">
+            <h2 style="border:none;padding:0;margin:0">${escapeHtml(profile.nickname)}</h2>
+            <div class="profile-meta">
+              <span class="profile-rank">${escapeHtml(profile.rank)}</span>
+              <span class="status-pill" style="background:${statusInfo.color}22;color:${statusInfo.color}">
+                ${statusInfo.label}
+              </span>
+            </div>
+            <div class="profile-since">В штате с ${fmtDate(profile.createdAt)}</div>
+          </div>
+        </div>
+
+        ${statBlock}
+
+        ${rankHistoryHtml}
+        ${awardsHtml}
+        ${warningsHtml}
+
+        <h3 class="profile-section-title">📝 Последние отчёты ${lastReports.length ? `(${lastReports.length} из ${allReports.length})` : ''}</h3>
+        ${lastReports.length ? lastReports.map(renderMiniReport).join('') : '<p class="doc-meta">Нет отчётов.</p>'}
+
+        <h3 class="profile-section-title">📋 Последние задержания ${lastDetentions.length ? `(${lastDetentions.length} из ${allDetentions.length})` : ''}</h3>
+        ${lastDetentions.length ? lastDetentions.map(renderMiniDetention).join('') : '<p class="doc-meta">Нет задержаний.</p>'}
+
+        <h3 class="profile-section-title">💰 Последние штрафы ${lastFines.length ? `(${lastFines.length} из ${allFines.length})` : ''}</h3>
+        ${lastFines.length ? lastFines.map(renderMiniFine).join('') : '<p class="doc-meta">Нет штрафов.</p>'}
+      `;
+
+    } catch (err) {
+      console.error(err);
+      container.innerHTML = `<p class="doc-meta" style="color:var(--danger)">Ошибка загрузки профиля: ${escapeHtml(err.message)}</p>`;
+    }
+  }, 0);
+
+  return `
+    <button class="btn secondary" style="margin-bottom:16px" onclick="location.hash='#/staff'">← Назад к Кадрам</button>
+    <div id="profileContainer"><p class="doc-meta">Загрузка профиля...</p></div>
+  `;
 }
 
 function renderStaff() {
@@ -739,6 +3135,9 @@ function renderStaff() {
 
   const html = `
     <h2>Кадровый состав</h2>
+    ${rolesIAssignViaInvite(currentProfile).length > 0
+      ? `<button class="btn" id="btnOpenInvites" style="margin:12px 0 16px">🔑 Приглашения</button>`
+      : ''}
     <p class="doc-meta">${iCanManage ? 'Ты можешь редактировать сотрудников ниже своего уровня' : 'Просмотр'}</p>
     <div class="counter-bar">
       <span>Активных: <strong>${active}</strong> / ${MAX_STAFF}</span>
@@ -767,22 +3166,30 @@ function renderStaff() {
         return `<option value="${r}" ${sel} ${dis}>${r}${canAssign ? '' : ' 🔒'}</option>`;
       }).join('');
 
-      return `<div class="staff-row ${u.status === 'fired' ? 'fired' : ''}">
+      return `<div class="staff-row status-${u.status} ${u.status === 'fired' ? 'fired' : ''}">
         <div>
           <div class="name">${escapeHtml(u.nickname)} ${heavy ? `<span style="color:var(--danger)">⚠️×${heavy}</span>` : ''}</div>
-          <div class="nick">${u.status === 'fired' ? 'УВОЛЕН' : 'активен'} · выговоров: ${warns.length}</div>
+          <div class="nick">
+            ${u.rank === 'Гражданский'
+              ? `<span style="color:var(--muted)">Гражданский</span>`
+              : `<span style="color:${STATUS_LABELS[u.status]?.color || '#888'}">${STATUS_LABELS[u.status]?.label || u.status}</span>
+                 · выговоров: ${warns.length}`}
+          </div>
         </div>
         ${editable ? `
           <select data-uid="${u.uid}" data-field="rank">${roleOptions}</select>
         ` : `<div class="role-label">${escapeHtml(u.rank)}</div>`}
         <div class="staff-actions">
+          <button class="btn secondary" data-open-profile="${u.uid}" title="Открыть профиль">👤</button>
           ${editable && u.rank !== 'Гражданский' ? `
-           <button class="btn secondary" data-warn="${u.uid}">⚠️</button>
-           ${canResetPasswords(currentProfile) ? `<button class="btn secondary" data-reset="${u.uid}" title="Сбросить пароль">🔑</button>` : ''}
-            ${u.status === 'active'
-              ? `<button class="btn danger" data-fire="${u.uid}">Уволить</button>`
-              : `<button class="btn" data-restore="${u.uid}">Вернуть</button>`}
-            ${isAdmin(currentProfile) ? `<button class="btn secondary" data-del="${u.uid}">🗑</button>` : ''}
+            <button class="btn secondary" data-warn="${u.uid}">⚠️</button>
+            ${canGiveAwards(currentProfile) && u.rank !== 'Гражданский' ? `<button class="btn secondary" data-award="${u.uid}" title="Поощрение">🏅</button>` : ''}
+            ${canResetPasswords(currentProfile) ? `<button class="btn secondary" data-reset="${u.uid}" title="Сбросить пароль">🔑</button>` : ''}
+            <select data-status="${u.uid}" class="status-select" title="Статус сотрудника">
+              ${Object.entries(STATUS_LABELS).map(([key, val]) =>
+                `<option value="${key}" ${u.status === key ? 'selected' : ''}>${val.label}</option>`
+              ).join('')}
+            </select>
           ` : ''}
         </div>
       </div>
@@ -809,10 +3216,16 @@ function renderStaff() {
     document.querySelectorAll('.staff-row select').forEach(sel => {
       sel.onchange = () => saveUserRole(sel.dataset.uid, sel.value);
     });
-    document.querySelectorAll('[data-fire]').forEach(b => b.onclick = () => fireUser(b.dataset.fire));
-    document.querySelectorAll('[data-restore]').forEach(b => b.onclick = () => restoreUser(b.dataset.restore));
+    // Открытие профиля
+    document.querySelectorAll('[data-open-profile]').forEach(b => {
+      b.onclick = () => { location.hash = '#/profile/' + b.dataset.openProfile; };
+    });
+    document.querySelectorAll('[data-status]').forEach(sel => {
+      sel.onchange = () => setUserStatus(sel.dataset.status, sel.value);
+    });
     document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => deleteUser(b.dataset.del));
     document.querySelectorAll('[data-warn]').forEach(b => b.onclick = () => addWarning(b.dataset.warn));
+    document.querySelectorAll('[data-award]').forEach(b => b.onclick = () => giveAward(b.dataset.award));
     document.querySelectorAll('[data-reset]').forEach(b => b.onclick = () => requestPasswordReset(b.dataset.reset));
     document.querySelectorAll('[data-rmwarn]').forEach(b => {
       b.onclick = () => {
@@ -827,23 +3240,72 @@ function renderStaff() {
 
 function renderInvites() {
   if (!canManageStaff(currentProfile)) return `<h2>Доступ запрещён</h2>`;
+
+  const myRoles = rolesIAssignViaInvite(currentProfile);
+  const canCreate = myRoles.length > 0;
+  const now = Date.now();
+
   return `
-    <h2>Пригласительные коды</h2>
-    <p class="doc-meta">Создавай коды, чтобы новички могли зарегистрироваться сразу с нужной ролью</p>
-    <button class="btn" id="btnCreateInvite" style="margin-bottom:20px">+ Создать код</button>
+    <button class="btn secondary" style="margin-bottom:16px" onclick="location.hash='#/staff'">← Назад к Кадрам</button>
+    <h2>🔑 Пригласительные коды</h2>
+    <p class="doc-meta">Создавай коды для регистрации новичков</p>
+
+    ${canCreate
+      ? `<button class="btn" id="btnCreateInvite" style="margin-bottom:20px">+ Создать код</button>`
+      : `<p class="doc-meta" style="color:var(--danger)">У тебя нет прав создавать приглашения</p>`}
+
     <div id="invitesList">
       ${cachedInvites.length === 0
         ? '<p class="doc-meta">Кодов пока нет.</p>'
-        : cachedInvites.map(i => `
-          <div class="invite-row ${i.usedBy ? 'used' : ''}">
-            <div>
-              <div class="invite-code">${escapeHtml(i.code)}</div>
-              <div class="invite-meta">Роль: <strong>${escapeHtml(i.role)}</strong> · от ${escapeHtml(i.createdByNick)}</div>
-              ${i.usedBy ? `<div class="invite-meta" style="color:var(--muted)">Использован: ${escapeHtml(i.usedByNick)} · ${fmtDate(i.usedAt)}</div>` : ''}
-            </div>
-            <button class="btn danger" data-delinv="${i.id}">🗑</button>
-          </div>
-        `).join('')}
+        : cachedInvites.map(i => {
+            const usedCount = i.usedCount || 0;
+            const maxUses = i.maxUses || 1;
+            const expiresAt = i.expiresAt ? new Date(i.expiresAt) : null;
+            const isExpired = expiresAt && expiresAt < now;
+            const isExhausted = usedCount >= maxUses;
+
+            let statusBadge;
+            let rowClass;
+            if (isExpired) {
+              statusBadge = '<span class="invite-badge expired">⏰ Истёк</span>';
+              rowClass = 'expired';
+            } else if (isExhausted) {
+              statusBadge = '<span class="invite-badge used">✓ Исчерпан</span>';
+              rowClass = 'used';
+            } else {
+              statusBadge = '<span class="invite-badge active">● Активен</span>';
+              rowClass = 'active';
+            }
+
+            const percent = Math.min(100, Math.round((usedCount / maxUses) * 100));
+
+            return `
+              <div class="invite-row ${rowClass}">
+                <div class="invite-main">
+                  <div class="invite-code">
+                    ${escapeHtml(i.code)}
+                    <button class="invite-copy-btn" data-copy="${escapeHtml(i.code)}" title="Скопировать">📋</button>
+                  </div>
+                  <div class="invite-badges">
+                    <span class="invite-badge role">🎖 ${escapeHtml(i.role)}</span>
+                    ${statusBadge}
+                    <span class="invite-badge">👤 ${usedCount}/${maxUses}</span>
+                    ${expiresAt ? `<span class="invite-badge">⏱ до ${expiresAt.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>` : ''}
+                  </div>
+                  <div class="invite-meta">
+                    Создал: <strong>${escapeHtml(i.createdByNick)}</strong>${i.createdByRank ? ` (${escapeHtml(i.createdByRank)})` : ''}
+                    ${(i.usedByNicks && i.usedByNicks.length) ? `<br>Использовали: ${i.usedByNicks.map(escapeHtml).join(', ')}` : ''}
+                  </div>
+                  <div class="invite-usage-bar">
+                    <div class="invite-usage-fill" style="width:${percent}%"></div>
+                  </div>
+                </div>
+                <div class="invite-actions">
+                  <button class="btn danger" data-delinv="${i.id}" title="Удалить">🗑</button>
+                </div>
+              </div>
+            `;
+          }).join('')}
     </div>
   `;
 }
@@ -910,45 +3372,1439 @@ function renderResets() {
   return html;
 }
 /* ==================== ТЕСТЫ ==================== */
-function renderTests() {
-  return `<h2>Тесты</h2>
-    <p class="doc-meta">Проверь свои знания</p>
-    <div class="cards">${TESTS.map(t => `
-      <div class="card" onclick="location.hash='#/test/${t.id}'">
-        <h4>${t.title}</h4>
-        <p>Вопросов: ${t.questions.length} · Проходной: ${t.passScore}%</p>
-      </div>`).join('')}</div>`;
-}
-function renderTest(id) {
-  const test = TESTS.find(t => t.id === id);
-  if (!test) return `<h2>Тест не найден</h2>`;
-  const html = `<h2>${test.title}</h2>
-    <p class="doc-meta">Проходной балл: ${test.passScore}%</p>
-    <form id="testForm">${test.questions.map((q,qi) => `
-      <div class="question"><p>${qi+1}. ${escapeHtml(q.q)}</p>
-        ${q.options.map((o,oi) => `
-          <label class="option"><input type="radio" name="q${qi}" value="${oi}"> ${escapeHtml(o)}</label>
-        `).join('')}
-      </div>`).join('')}
-      <button type="button" class="btn" id="btnCheckTest">Завершить тест</button>
-    </form><div id="testResult"></div>`;
+/* ==================== СТРАНИЦЫ ЗАДЕРЖАНИЙ И ШТРАФОВ ==================== */
+/* ==================== ОБЁРТКА РЕЕСТРА С ВКЛАДКАМИ ==================== */
+function renderRegistry(activeTab) {
+  if (!isPolice(currentProfile) && !canReview(currentProfile) && !canManageStaff(currentProfile)) {
+    return `<h2>Доступ запрещён</h2>`;
+  }
+  const tab = activeTab || 'detentions';
+
+  const detCount = cachedDetentions.length;
+  const fineCount = cachedFines.length;
+
+  const tabsHtml = `
+    <div class="registry-tabs">
+      <button class="registry-tab ${tab === 'detentions' ? 'active' : ''}"
+              data-reg-tab="detentions">
+        📋 Задержания <span class="tab-badge">${detCount}</span>
+      </button>
+      <button class="registry-tab ${tab === 'fines' ? 'active' : ''}"
+              data-reg-tab="fines">
+        💰 Штрафы <span class="tab-badge">${fineCount}</span>
+      </button>
+    </div>
+  `;
+
+  // Контент активной вкладки (без заголовка h2 — он уже сверху)
+  const content = tab === 'detentions' ? renderDetentions() : renderFines();
+
   setTimeout(() => {
-    document.getElementById('btnCheckTest').onclick = () => {
-      let correct = 0;
-      test.questions.forEach((q,qi) => {
-        const sel = document.querySelector(`input[name="q${qi}"]:checked`);
-        if (sel && Number(sel.value) === q.correct) correct++;
-      });
-      const pct = Math.round(correct / test.questions.length * 100);
-      const pass = pct >= test.passScore;
-      document.getElementById('testResult').innerHTML = `
-        <div class="result ${pass ? 'pass' : 'fail'}">
-          ${pass ? '✅ ТЕСТ ПРОЙДЕН' : '❌ НЕ ПРОЙДЕН'}<br>
-          ${correct}/${test.questions.length} (${pct}%)
-        </div>`;
-    };
+    document.querySelectorAll('[data-reg-tab]').forEach(b => {
+      b.onclick = () => {
+        location.hash = '#/registry/' + b.dataset.regTab;
+      };
+    });
   }, 0);
-  return html;
+
+  return `
+    <h2>⚖️ Реестр задержаний и штрафов</h2>
+    ${tabsHtml}
+    <div class="registry-content">${content}</div>
+  `;
+}
+function renderDetentions() {
+  if (!isPolice(currentProfile) && !canReview(currentProfile) && !canManageStaff(currentProfile)) {
+    return `<h2>Доступ запрещён</h2>`;
+  }
+  const canSubmit = isPolice(currentProfile);
+
+  const form = canSubmit ? `
+    <div class="form-group">
+      <label>ФИО задержанного</label>
+      <input id="d-target" type="text" placeholder="Иван Иванов">
+    </div>
+
+    ${renderArticleSearch('d-articles-search','d-articles-results','d-articles-selected','detentions')}
+
+    <div class="form-group">
+      <label>Срок лишения свободы (минут, 1–${DETENTION_MAX_PRISON_MINUTES})</label>
+      <input id="d-prison" type="number" min="1" max="${DETENTION_MAX_PRISON_MINUTES}" placeholder="10">
+    </div>
+
+    <div class="form-group">
+      <label>Напарник (необязательно)</label>
+      <select id="d-partner"><option value="">— Один —</option></select>
+    </div>
+
+    <div class="form-group">
+      <label class="label-with-attach">
+        Комментарий
+        <button type="button" class="attach-btn" data-attach-for="detentions">📎 Прикрепить</button>
+      </label>
+      <textarea id="d-comment" style="min-height:70px" placeholder="Дополнительно... (Ctrl+V для фото)"></textarea>
+      <input type="file" multiple accept="image/*,video/*,application/pdf"
+             id="upload-input-detentions" style="display:none">
+      <div class="upload-list" id="upload-list-detentions"></div>
+    </div>
+
+    ${renderDraftIndicator('detentions')}    
+    <button class="btn" id="btnSubmitDetention">Записать задержание</button>
+    <hr style="margin:24px 0;border-color:var(--line)">
+  ` : '';
+
+  setTimeout(() => {
+    // Обработчики формы
+    document.getElementById('btnSubmitDetention')?.addEventListener('click', submitDetention);
+    const dSearch = document.getElementById('d-articles-search');
+    if (dSearch) {
+      dSearch.addEventListener('input', () =>
+        updateLawResults('d-articles-search','d-articles-results','detentions'));
+    }
+    refreshLawSelection('detentions');
+    initFileUploaders();
+      // Жёсткая валидация поля срока
+  const prisonInput = document.getElementById('d-prison');
+  if (prisonInput) {
+    prisonInput.addEventListener('input', () => {
+      let v = parseInt(prisonInput.value, 10);
+      if (isNaN(v)) { prisonInput.value = ''; return; }
+
+      // Обрезаем до максимума
+      if (v > DETENTION_MAX_PRISON_MINUTES) {
+        prisonInput.value = DETENTION_MAX_PRISON_MINUTES;
+        v = DETENTION_MAX_PRISON_MINUTES;
+        toast(`Максимум ${DETENTION_MAX_PRISON_MINUTES} минут`, 'err');
+      }
+      // Не меньше 1
+      if (v < 1 && prisonInput.value !== '') {
+        prisonInput.value = 1;
+      }
+      // Красим поле, если достигнут максимум
+      prisonInput.classList.toggle('at-limit', v === DETENTION_MAX_PRISON_MINUTES);
+    });
+
+    // На всякий случай — блокируем ввод буквы "e", "+", "-" (экспонента/знаки)
+    prisonInput.addEventListener('keydown', e => {
+      if (['e', 'E', '+', '-'].includes(e.key)) e.preventDefault();
+    });
+
+    // При потере фокуса — если пусто, подставляем 1
+    prisonInput.addEventListener('blur', () => {
+      if (prisonInput.value === '') prisonInput.value = 1;
+    });
+  }
+    // Партнёры
+    const pSel = document.getElementById('d-partner');
+    if (pSel) {
+      const opts = ['<option value="">— Один —</option>'];
+      cachedUsers.forEach(u => {
+        if (u.status !== 'active' || u.uid === currentUser.uid) return;
+        if (!isPolice(u)) return;
+        opts.push(`<option value="${u.uid}">${escapeHtml(u.nickname)} — ${escapeHtml(u.rank)}</option>`);
+      });
+      pSel.innerHTML = opts.join('');
+    }
+    // Кнопки действий в карточках
+    document.querySelectorAll('[data-det-act]').forEach(b => {
+      b.onclick = () => {
+        const [act, id] = b.dataset.detAct.split(':');
+        if (act === 'accept')  reviewDetention('detentions', id, 'accepted');
+        if (act === 'reject')  reviewDetention('detentions', id, 'rejected');
+        if (act === 'del')     deleteDetentionRecord('detentions', id);
+        if (act === 'release') releaseEarly('detentions', id);
+        if (act === 'edit')    editDetention('detentions', id);
+      };
+    });
+    initDraft('detentions', {
+      'd-target': 'target',
+      'd-prison': 'prison',
+      'd-partner': 'partner',
+      'd-comment': 'comment'
+    });
+  }, 0);
+
+  const visible = cachedDetentions.filter(r =>
+    canReview(currentProfile) ||
+    canManageStaff(currentProfile) ||
+    r.authorUid === currentUser.uid ||
+    (r.partners || []).some(p => p.uid === currentUser.uid)
+  );
+
+  return `
+    <p class="doc-meta">Аресты и сроки лишения свободы</p>
+    ${canSubmit ? form : ''}
+    <h3 style="color:var(--accent);margin:20px 0 12px">Записи (${visible.length})</h3>
+    ${visible.length === 0 ? '<p class="doc-meta">Пока нет записей.</p>' :
+      visible.map(r => renderDetentionCard(r)).join('')}
+  `;
+}
+
+function renderDetentionCard(r) {
+  const canRev = canReview(currentProfile);
+  const canDel = CAN_DELETE_REPORTS.includes(currentProfile.rank);
+  const canRel = canReleaseEarly(currentProfile);
+  const canEdit = canEditRecord(r);
+
+  const articles = (r.articles || []).map(a => `
+    <div class="law-chip">${escapeHtml(a.code)} ${escapeHtml(a.codeType)}${
+      a.wantedLevel ? ' ' + '★'.repeat(a.wantedLevel) : ''
+    }</div>
+  `).join('');
+
+  const edits = (r.edits || []).length ? `
+    <div class="edit-history">
+      <div class="edit-history-title">⚠️ Редактирования:</div>
+      ${r.edits.map(e => `
+        <div class="edit-item">
+          ${fmtDate(e.at)} — <strong>${escapeHtml(e.by)}</strong> (${escapeHtml(e.rank)})
+          <div class="edit-reason">${escapeHtml(e.reason)} · ${escapeHtml(e.changes || '')}</div>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  const released = r.releasedEarly ? `
+    <div class="released-badge">
+      🔓 Досрочно освобождён ${fmtDate(r.releasedEarly.at)} —
+      ${escapeHtml(r.releasedEarly.by)} (${escapeHtml(r.releasedEarly.rank)})
+      <div class="edit-reason">${escapeHtml(r.releasedEarly.reason)}</div>
+    </div>
+  ` : '';
+
+  const partners = (r.partners || []).length
+    ? `<div class="report-type">👥 ${r.partners.map(p => escapeHtml(p.nickname) + ' — ' + escapeHtml(p.rank)).join(', ')}</div>`
+    : '';
+
+  return `
+    <div class="report-card status-${r.status}">
+      <div class="report-head">
+        <div class="report-author">${escapeHtml(r.target)}
+          <span class="rank">${escapeHtml(r.authorNick)} · ${escapeHtml(r.authorRank)}</span>
+        </div>
+        <div class="report-date">${fmtDate(r.createdAt)}</div>
+      </div>
+      <div class="report-type">${statusLabel(r.status)} · ⏱ ${r.prisonMinutes} мин</div>
+      ${partners}
+      <div class="law-chips">${articles}</div>
+      ${renderAttachments(r.files)}
+      ${r.comment ? `<div class="report-desc">${escapeHtml(r.comment)}</div>` : ''}
+      ${r.reviewComment ? `<div class="report-comment">💬 <strong>${escapeHtml(r.reviewedBy || '')}:</strong> ${escapeHtml(r.reviewComment)}</div>` : ''}
+      ${released}
+      ${edits}
+      <div class="report-actions">
+        ${canRev && r.status !== 'accepted' ? `<button class="btn" data-det-act="accept:${r.id}">✓ Принять</button>` : ''}
+        ${canRev && r.status !== 'rejected' ? `<button class="btn danger" data-det-act="reject:${r.id}">✗ Отклонить</button>` : ''}
+        ${canEdit ? `<button class="btn secondary" data-det-act="edit:${r.id}">✏️ Ред.</button>` : ''}
+        ${canRel && !r.releasedEarly ? `<button class="btn secondary" data-det-act="release:${r.id}">🔓 Досрочно</button>` : ''}
+        ${canDel ? `<button class="btn secondary" data-det-act="del:${r.id}">🗑</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderFines() {
+  if (!isPolice(currentProfile) && !canReview(currentProfile) && !canManageStaff(currentProfile)) {
+    return `<h2>Доступ запрещён</h2>`;
+  }
+  const canSubmit = isPolice(currentProfile);
+
+  const form = canSubmit ? `
+    <div class="form-group"><label>ФИО</label>
+      <input id="f-target" type="text" placeholder="Иван Иванов"></div>
+
+    ${renderArticleSearch('f-articles-search','f-articles-results','f-articles-selected','fines')}
+
+    <div class="form-group"><label>Сумма штрафа (exp)</label>
+      <input id="f-amount" type="number" min="1" placeholder="10000"></div>
+
+    <div class="form-group"><label>Напарник (необязательно)</label>
+      <select id="f-partner"><option value="">— Один —</option></select></div>
+
+    <div class="form-group">
+      <label class="label-with-attach">
+        Комментарий
+        <button type="button" class="attach-btn" data-attach-for="fines">📎 Прикрепить</button>
+      </label>
+      <textarea id="f-comment" style="min-height:70px" placeholder="Дополнительно... (Ctrl+V для фото)"></textarea>
+      <input type="file" multiple accept="image/*,video/*,application/pdf"
+             id="upload-input-fines" style="display:none">
+      <div class="upload-list" id="upload-list-fines"></div>
+    </div>
+
+    ${renderDraftIndicator('fines')}    
+    <button class="btn" id="btnSubmitFine">Записать штраф</button>
+    <hr style="margin:24px 0;border-color:var(--line)">
+  ` : '';
+
+  setTimeout(() => {
+    document.getElementById('btnSubmitFine')?.addEventListener('click', submitFine);
+    const fSearch = document.getElementById('f-articles-search');
+    if (fSearch) {
+      fSearch.addEventListener('input', () =>
+        updateLawResults('f-articles-search','f-articles-results','fines'));
+    }
+    refreshLawSelection('fines');
+    initFileUploaders();
+    const pSel = document.getElementById('f-partner');
+    if (pSel) {
+      const opts = ['<option value="">— Один —</option>'];
+      cachedUsers.forEach(u => {
+        if (u.status !== 'active' || u.uid === currentUser.uid) return;
+        if (!isPolice(u)) return;
+        opts.push(`<option value="${u.uid}">${escapeHtml(u.nickname)} — ${escapeHtml(u.rank)}</option>`);
+      });
+      pSel.innerHTML = opts.join('');
+    }
+    document.querySelectorAll('[data-fine-act]').forEach(b => {
+      b.onclick = () => {
+        const [act, id] = b.dataset.fineAct.split(':');
+        if (act === 'accept') reviewDetention('fines', id, 'accepted');
+        if (act === 'reject') reviewDetention('fines', id, 'rejected');
+        if (act === 'del')    deleteDetentionRecord('fines', id);
+        if (act === 'edit')   editDetention('fines', id);
+      };
+    });
+    initDraft('fines', {
+      'f-target': 'target',
+      'f-amount': 'amount',
+      'f-partner': 'partner',
+      'f-comment': 'comment'
+    });
+  }, 0);
+
+  const visible = cachedFines.filter(r =>
+    canReview(currentProfile) ||
+    canManageStaff(currentProfile) ||
+    r.authorUid === currentUser.uid ||
+    (r.partners || []).some(p => p.uid === currentUser.uid)
+);
+
+  return `
+    <p class="doc-meta">Штрафы в exp</p>
+    ${canSubmit ? form : ''}
+    <h3 style="color:var(--accent);margin:20px 0 12px">Записи (${visible.length})</h3>
+    ${visible.length === 0 ? '<p class="doc-meta">Пока нет записей.</p>' :
+      visible.map(r => renderFineCard(r)).join('')}
+  `;
+}
+
+function renderFineCard(r) {
+  const canRev = canReview(currentProfile);
+  const canDel = CAN_DELETE_REPORTS.includes(currentProfile.rank);
+  const canEdit = canEditRecord(r);
+
+  const articles = (r.articles || []).map(a => `
+    <div class="law-chip">${escapeHtml(a.code)} ${escapeHtml(a.codeType)}${
+      a.wantedLevel ? ' ' + '★'.repeat(a.wantedLevel) : ''
+    }</div>
+  `).join('');
+
+  const edits = (r.edits || []).length ? `
+    <div class="edit-history">
+      <div class="edit-history-title">⚠️ Редактирования:</div>
+      ${r.edits.map(e => `
+        <div class="edit-item">
+          ${fmtDate(e.at)} — <strong>${escapeHtml(e.by)}</strong> (${escapeHtml(e.rank)})
+          <div class="edit-reason">${escapeHtml(e.reason)} · ${escapeHtml(e.changes || '')}</div>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  const partners = (r.partners || []).length
+    ? `<div class="report-type">👥 ${r.partners.map(p => escapeHtml(p.nickname)).join(', ')}</div>`
+    : '';
+
+  return `
+    <div class="report-card status-${r.status}">
+      <div class="report-head">
+        <div class="report-author">${escapeHtml(r.target)}
+          <span class="rank">${escapeHtml(r.authorNick)} · ${escapeHtml(r.authorRank)}</span>
+        </div>
+        <div class="report-date">${fmtDate(r.createdAt)}</div>
+      </div>
+      <div class="report-type">${statusLabel(r.status)} · 💰 ${Number(r.amount).toLocaleString('ru-RU')} exp</div>
+      ${partners}
+      <div class="law-chips">${articles}</div>
+      ${renderAttachments(r.files)}
+      ${r.comment ? `<div class="report-desc">${escapeHtml(r.comment)}</div>` : ''}
+      ${r.reviewComment ? `<div class="report-comment">💬 <strong>${escapeHtml(r.reviewedBy || '')}:</strong> ${escapeHtml(r.reviewComment)}</div>` : ''}
+      ${edits}
+      <div class="report-actions">
+        ${canRev && r.status !== 'accepted' ? `<button class="btn" data-fine-act="accept:${r.id}">✓ Принять</button>` : ''}
+        ${canRev && r.status !== 'rejected' ? `<button class="btn danger" data-fine-act="reject:${r.id}">✗ Отклонить</button>` : ''}
+        ${canEdit ? `<button class="btn secondary" data-fine-act="edit:${r.id}">✏️ Ред.</button>` : ''}
+        ${canDel ? `<button class="btn secondary" data-fine-act="del:${r.id}">🗑</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+/* ==================== ТЕСТЫ — ИНТЕРФЕЙС ==================== */
+
+// Виден ли тест пользователю (новая логика через audienceRoles)
+function canSeeTestDynamic(test, profile) {
+  if (!profile) return false;
+
+  // Полковник+ и Старший админ видят всё
+  if (canSeeAllTests(profile)) return true;
+
+  // Если массив ролей не задан или пуст — видят все (legacy)
+  const roles = test.audienceRoles;
+  if (!Array.isArray(roles) || roles.length === 0) return true;
+
+  // Иначе — только если роль пользователя в списке
+  return roles.includes(profile.rank);
+}
+
+// Бейдж аудитории — теперь на основе массива ролей
+function testAudienceBadgeDynamic(test) {
+  const roles = test.audienceRoles;
+
+  // Если массив не задан или пуст → видят все
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return `<span class="test-badge" style="border-color:#2ecc71;color:#2ecc71">Для всех</span>`;
+  }
+
+  // Один-два — показываем имена
+  if (roles.length <= 2) {
+    return roles.map(r =>
+      `<span class="test-badge" style="border-color:#f0b429;color:#f0b429">${escapeHtml(r)}</span>`
+    ).join(' ');
+  }
+
+  // Три и больше — «N ролей»
+  return `<span class="test-badge" style="border-color:#f0b429;color:#f0b429">🎖 ${roles.length} ролей</span>`;
+}
+
+/* ==================== РЕДАКТОР ТЕСТА ==================== */
+// Временно — заглушка, реализация на 4.3.2
+/* ==================== МОДАЛКА ВОПРОСА ==================== */
+function openQuestionModal(testId, questionId) {
+  if (!canManageTests(currentProfile)) return toast('Нет прав', 'err');
+
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return toast('Тест не найден', 'err');
+
+  const isEdit = !!questionId;
+  const existing = isEdit ? (test.questions || []).find(q => q.id === questionId) : null;
+
+  // Сбрасываем pendingFiles.question
+  pendingFiles.question = [];
+
+  // Начальные варианты
+  let initialOptions = existing?.options?.length
+    ? existing.options.map(o => ({ text: o.text || '', correct: !!o.correct }))
+    : [
+        { text: '', correct: false },
+        { text: '', correct: false }
+      ];
+
+  // Считаем правильные для определения режима
+  const initialCorrectCount = initialOptions.filter(o => o.correct).length;
+
+  openModal(`
+    <h3>${isEdit ? '✏️ Редактировать вопрос' : '➕ Новый вопрос'}</h3>
+
+    <div class="form-group">
+      <label>Текст вопроса *</label>
+      <textarea id="q-text" placeholder="Что нужно спросить?" style="min-height:80px">${existing ? escapeHtml(existing.text || '') : ''}</textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="label-with-attach">
+        Картинка к вопросу
+        <button type="button" class="attach-btn" data-attach-for="question">📎 Прикрепить</button>
+      </label>
+      <input type="file" accept="image/*" id="upload-input-question" style="display:none">
+      <div class="upload-list" id="upload-list-question"></div>
+      <div class="existing-q-image" id="existingQImageWrap" style="${existing?.image ? '' : 'display:none'}">
+        <img src="${existing?.image ? escapeHtml(existing.image) : ''}" id="existingQImage" alt="">
+        <button type="button" class="existing-q-image-remove" id="btnRemoveExistingQImage">×</button>
+      </div>
+      <div class="q-image-hint">Можно вставить через Ctrl+V</div>
+    </div>
+
+    <div class="form-group">
+      <label>Варианты ответа *</label>
+      <div class="q-options-mode-hint" id="qOptionsModeHint"></div>
+      <div class="question-options ${initialCorrectCount >= 2 ? 'mode-multi' : 'mode-single'}" id="qOptionsList">
+        ${initialOptions.map((o, i) => renderQuestionOptionRow(o, i)).join('')}
+      </div>
+      <button type="button" class="btn secondary tiny" id="btnAddOption" style="margin-top:10px;width:auto;padding:6px 14px;font-size:12px">+ Добавить вариант</button>
+      <div class="q-options-help">
+        Клик по кружку/квадрату слева — пометить как правильный.<br>
+        Если правильный <strong>один</strong> — это кружок, если <strong>больше одного</strong> — квадрат.
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn" data-confirm>${isEdit ? 'Сохранить' : 'Добавить'}</button>
+    </div>
+  `, (overlay, close) => {
+    let existingImageRemoved = false;
+
+    const optionsList = overlay.querySelector('#qOptionsList');
+    const modeHint = overlay.querySelector('#qOptionsModeHint');
+
+    // Функция перерисовки режима
+    function updateMode() {
+      const correctCount = optionsList.querySelectorAll('.q-opt-row.correct').length;
+      optionsList.classList.toggle('mode-single', correctCount <= 1);
+      optionsList.classList.toggle('mode-multi', correctCount >= 2);
+      modeHint.innerHTML = correctCount >= 2
+        ? `🔲 Режим: <strong>несколько правильных</strong> (${correctCount})`
+        : `⚪ Режим: <strong>один правильный</strong>`;
+    }
+
+    // Обработчики на варианты
+    function attachRowEvents(row) {
+      row.querySelector('.opt-marker').onclick = () => {
+        row.classList.toggle('correct');
+        updateMode();
+      };
+      row.querySelector('.opt-del')?.addEventListener('click', () => {
+        const rows = optionsList.querySelectorAll('.q-opt-row');
+        if (rows.length <= 2) return toast('Минимум 2 варианта', 'err');
+        row.remove();
+        updateMode();
+      });
+    }
+
+    optionsList.querySelectorAll('.q-opt-row').forEach(attachRowEvents);
+    updateMode();
+
+    // Добавить вариант
+    overlay.querySelector('#btnAddOption').onclick = () => {
+      const rows = optionsList.querySelectorAll('.q-opt-row');
+      if (rows.length >= 6) return toast('Максимум 6 вариантов', 'err');
+      const newRow = document.createElement('div');
+      newRow.className = 'q-opt-row';
+      newRow.innerHTML = `
+        <button type="button" class="opt-marker"></button>
+        <input type="text" class="opt-text" placeholder="Вариант ${rows.length + 1}">
+        <button type="button" class="opt-del" title="Удалить">×</button>
+      `;
+      optionsList.appendChild(newRow);
+      attachRowEvents(newRow);
+      newRow.querySelector('.opt-text').focus();
+    };
+
+    // Удаление существующей картинки
+    overlay.querySelector('#btnRemoveExistingQImage')?.addEventListener('click', () => {
+      existingImageRemoved = true;
+      overlay.querySelector('#existingQImageWrap').style.display = 'none';
+    });
+
+    // Инициализируем загрузчик файлов
+    initFileUploaders();
+
+    // Отмена
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    // Сохранение
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const text = overlay.querySelector('#q-text').value.trim();
+      if (!text) return toast('Введи текст вопроса', 'err');
+
+      const rows = Array.from(optionsList.querySelectorAll('.q-opt-row'));
+      const options = rows.map(row => ({
+        text: row.querySelector('.opt-text').value.trim(),
+        correct: row.classList.contains('correct')
+      }));
+
+      if (options.some(o => !o.text)) return toast('Заполни все варианты', 'err');
+      const correctCount = options.filter(o => o.correct).length;
+      if (correctCount === 0) return toast('Отметь хотя бы один правильный ответ', 'err');
+
+      // Обработка картинки
+      let image = existing?.image || '';
+      if (existingImageRemoved) image = '';
+
+      // Загружаем новый файл, если он есть
+      if (pendingFiles.question.length > 0) {
+        toast('Загрузка картинки...');
+        const uploaded = await uploadAllFiles(pendingFiles.question, 'tests');
+        if (uploaded.length > 0) image = uploaded[0].url;
+      }
+
+      // Сохраняем
+      if (isEdit) {
+        await updateQuestion(testId, questionId, { text, image, options });
+      } else {
+        await addQuestion(testId, { text, image, options });
+      }
+
+      pendingFiles.question = [];
+      close();
+    };
+  });
+}
+
+function renderQuestionOptionRow(opt, idx) {
+  const cls = opt.correct ? 'q-opt-row correct' : 'q-opt-row';
+  return `
+    <div class="${cls}">
+      <button type="button" class="opt-marker"></button>
+      <input type="text" class="opt-text" placeholder="Вариант ${idx + 1}" value="${escapeHtml(opt.text || '')}">
+      <button type="button" class="opt-del" title="Удалить">×</button>
+    </div>
+  `;
+}
+function renderTestEditor(testId) {
+  if (!canManageTests(currentProfile)) {
+    return `<h2>Доступ запрещён</h2>
+      <p class="doc-meta">Только ${TEST_MANAGER_ROLES.join(', ')} может редактировать тесты.</p>`;
+  }
+
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) {
+    return `<h2>Тест не найден</h2>
+      <button class="btn" onclick="location.hash='#/tests'">← К списку</button>`;
+  }
+
+  const questions = test.questions || [];
+  const roles = test.audienceRoles || [];
+  const rolesText = roles.length === 0
+    ? 'Для всех ролей'
+    : roles.length <= 3
+      ? roles.join(', ')
+      : `${roles.length} ролей`;
+
+  setTimeout(() => {
+    // Обработчики
+    document.getElementById('btnEditSettings')?.addEventListener('click', () => {
+      openTestCreateModal(test);
+    });
+
+    document.getElementById('btnAddQuestion')?.addEventListener('click', () => {
+      openQuestionModal(testId, null, questions.length);
+    });
+
+    // Управление вопросами
+    document.querySelectorAll('[data-q-action]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const [action, qid] = btn.dataset.qAction.split(':');
+        if (action === 'edit')   openQuestionModal(testId, qid);
+        if (action === 'del')    deleteQuestion(testId, qid);
+        if (action === 'up')     moveQuestion(testId, qid, -1);
+        if (action === 'down')   moveQuestion(testId, qid, 1);
+        if (action === 'dup')    duplicateQuestion(testId, qid);
+      };
+    });
+
+    // Кнопка «Просмотр теста»
+    document.getElementById('btnPreviewTest')?.addEventListener('click', () => {
+      if (questions.length === 0) return toast('Сначала добавь вопросы', 'err');
+      startTestRun(testId);
+    });
+
+    // Переключение скрытности
+    document.getElementById('btnToggleHidden')?.addEventListener('click', async () => {
+      await updateTest(testId, { hidden: !test.hidden });
+    });
+
+    // Удаление теста
+    document.getElementById('btnDeleteTest')?.addEventListener('click', async () => {
+      if (!confirm('Удалить тест со всеми вопросами? Это действие необратимо.')) return;
+      await deleteTest(testId);
+      location.hash = '#/tests';
+    });
+  }, 0);
+
+  return `
+    <button class="btn secondary" style="margin-bottom:16px" onclick="location.hash='#/tests'">← К списку тестов</button>
+
+    <div class="editor-header">
+      <div>
+        <h2 style="margin-bottom:4px">${test.hidden ? '🔒 ' : ''}${escapeHtml(test.title)}</h2>
+        <p class="doc-meta" style="margin:0">
+          ${escapeHtml(rolesText)} · Проходной: ${test.passScore}% · 
+          ${test.timeLimit > 0 ? `⏱ ${Math.floor(test.timeLimit/60)} мин` : '⏱ без лимита'} · 
+          ${questions.length} ${questions.length === 1 ? 'вопрос' : 'вопросов'}
+        </p>
+      </div>
+      <div class="editor-header-actions">
+        <button class="btn secondary" id="btnEditSettings">⚙️ Настройки</button>
+        <button class="btn secondary" id="btnPreviewTest">👁 Просмотр</button>
+        <button class="btn secondary" id="btnToggleHidden">${test.hidden ? '👁 Показать' : '🔒 Скрыть'}</button>
+        <button class="btn danger" id="btnDeleteTest">🗑 Удалить</button>
+      </div>
+    </div>
+
+    <div class="editor-toolbar">
+      <button class="btn" id="btnAddQuestion">+ Добавить вопрос</button>
+    </div>
+
+    <div class="editor-questions">
+      ${questions.length === 0
+        ? '<p class="doc-meta">Пока нет вопросов. Нажми «+ Добавить вопрос», чтобы начать.</p>'
+        : questions.map((q, i) => renderQuestionRow(q, i, testId)).join('')}
+    </div>
+  `;
+}
+
+// Одна строка вопроса в списке редактора
+function renderQuestionRow(q, idx, testId) {
+  const optCount = (q.options || []).length;
+  const correctCount = (q.options || []).filter(o => o.correct).length;
+  const hasImage = !!q.image;
+
+  const optionsPreview = (q.options || []).map((o, i) => {
+    const marker = o.correct ? '✓' : '○';
+    const cls = o.correct ? 'correct' : '';
+    return `<div class="q-opt-preview ${cls}">${marker} ${escapeHtml(o.text || '—')}</div>`;
+  }).join('');
+
+  return `
+    <div class="editor-question-card">
+      <div class="eq-head">
+        <div class="eq-number">${idx + 1}</div>
+        <div class="eq-body">
+          <div class="eq-text">${escapeHtml(q.text || '— без текста —')}</div>
+          <div class="eq-meta">
+            ${optCount} ${optCount === 1 ? 'вариант' : 'вариантов'} · 
+            ${correctCount} ${correctCount === 1 ? 'правильный' : 'правильных'}
+            ${hasImage ? ' · 🖼 с картинкой' : ''}
+          </div>
+        </div>
+        <div class="eq-actions">
+          <button class="eq-btn" data-q-action="up:${q.id}" title="Вверх">↑</button>
+          <button class="eq-btn" data-q-action="down:${q.id}" title="Вниз">↓</button>
+          <button class="eq-btn" data-q-action="dup:${q.id}" title="Дублировать">📋</button>
+          <button class="eq-btn edit" data-q-action="edit:${q.id}" title="Редактировать">✏️</button>
+          <button class="eq-btn del" data-q-action="del:${q.id}" title="Удалить">🗑</button>
+        </div>
+      </div>
+      ${hasImage ? `
+        <div class="eq-image-preview">
+          <img src="${escapeHtml(q.image)}" alt="" onerror="this.style.display='none'">
+        </div>
+      ` : ''}
+      <div class="eq-options-preview">
+        ${optionsPreview}
+      </div>
+    </div>
+  `;
+}
+
+// Дублирование вопроса
+async function duplicateQuestion(testId, questionId) {
+  if (!canManageTests(currentProfile)) return toast('Нет прав', 'err');
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return;
+
+  const original = (test.questions || []).find(q => q.id === questionId);
+  if (!original) return;
+
+  const copy = {
+    id: 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+    text: (original.text || '') + ' (копия)',
+    image: original.image || '',
+    options: (original.options || []).map(o => ({ text: o.text, correct: o.correct })),
+    createdAt: new Date().toISOString()
+  };
+
+  const newQuestions = [...(test.questions || []), copy];
+  await updateDoc(doc(db,'tests',testId), {
+    questions: newQuestions,
+    questionsEditedAt: new Date().toISOString(),
+    updatedAt: serverTimestamp(),
+    updatedBy: currentProfile.nickname
+  });
+  toast('Вопрос продублирован');
+}
+
+function renderTests() {
+  const available = cachedTests.filter(t => {
+    if (t.hidden && !canManageTests(currentProfile) && !canSeeAllTests(currentProfile)) return false;
+    return canSeeTestDynamic(t, currentProfile);
+  });
+  const canManage = canManageTests(currentProfile);
+  const canViewHistory = lvl(currentProfile.rank) >= 13 || canManage;
+
+  const lastResult = (testId) => {
+    const mine = cachedTestResults
+      .filter(r => r.testId === testId && r.userId === currentUser.uid)
+      .sort((a,b) => {
+        const ta = a.finishedAt?.toDate?.() || new Date(a.finishedAt || 0);
+        const tb = b.finishedAt?.toDate?.() || new Date(b.finishedAt || 0);
+        return tb - ta;
+      });
+    return mine[0] || null;
+  };
+
+  const cardsHtml = available.map(t => {
+    const qCount = (t.questions || []).length;
+    const last = lastResult(t.id);
+    const timerInfo = t.timeLimit > 0
+      ? `⏱ ${Math.floor(t.timeLimit / 60)} мин`
+      : '⏱ без лимита';
+
+    let statusBlock = '';
+    if (last) {
+      const cls = last.passed ? 'pass' : 'fail';
+      const icon = last.passed ? '✅' : '❌';
+      statusBlock = `
+        <div class="test-last-result ${cls}">
+          ${icon} Твой последний результат: <strong>${last.percent}%</strong>
+          (${last.score}/${last.total})
+        </div>
+      `;
+    }
+
+    return `
+      <div class="card test-card ${t.hidden ? 'test-hidden' : ''}" data-test-id="${t.id}">
+        <h4>${t.hidden ? '🔒 ' : ''}${escapeHtml(t.title)}</h4>
+        ${t.description ? `<p style="margin-bottom:8px">${escapeHtml(t.description)}</p>` : ''}
+        <div class="test-card-meta">
+          <span>📝 ${qCount} вопросов</span>
+          <span>🎯 Проходной: ${t.passScore}%</span>
+          <span>${timerInfo}</span>
+        </div>
+        ${testAudienceBadgeDynamic(t)}
+        ${statusBlock}
+        <div class="test-card-actions">
+          <button class="btn" data-start-test="${t.id}">${last ? 'Пройти заново' : 'Пройти тест'}</button>
+          ${canViewHistory ? `<button class="btn secondary" data-test-history="${t.id}">📊 Результаты</button>` : ''}
+          ${canManage ? `<button class="btn secondary" data-edit-test="${t.id}">✏️ Редактировать</button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  setTimeout(() => {
+    document.querySelectorAll('[data-start-test]').forEach(b => {
+      b.onclick = () => startTestRun(b.dataset.startTest);
+    });
+    document.querySelectorAll('[data-test-history]').forEach(b => {
+      b.onclick = () => { location.hash = '#/test-history/' + b.dataset.testHistory; };
+    });
+    document.querySelectorAll('[data-edit-test]').forEach(b => {
+      b.onclick = () => { location.hash = '#/test-editor/' + b.dataset.editTest; };
+    });
+    document.getElementById('btnCreateTest')?.addEventListener('click', () => {
+      openTestCreateModal(null);
+    });
+  }, 0);
+
+  return `
+    <h2>🎓 Тесты</h2>
+    <p class="doc-meta">Доступно тестов: ${available.length}</p>
+
+    ${canManage ? `
+      <button class="btn" id="btnCreateTest" style="margin-bottom:20px">+ Создать тест</button>
+    ` : ''}
+
+    ${available.length === 0
+      ? '<p class="doc-meta">Для твоей роли пока нет доступных тестов.</p>'
+      : `<div class="cards">${cardsHtml}</div>`}
+  `;
+}
+
+// ---------- Начать прохождение ----------
+function startTestRun(testId) {
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return toast('Тест не найден', 'err');
+
+  const questions = (test.questions || []).slice();
+  if (questions.length === 0) return toast('В тесте нет вопросов', 'err');
+
+  if (test.shuffleQuestions) {
+    for (let i = questions.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [questions[i], questions[j]] = [questions[j], questions[i]];
+    }
+  }
+
+  if (test.shuffleOptions) {
+    questions.forEach(q => {
+      const opts = q.options.slice();
+      // Запоминаем правильные по тексту, потом восстановим
+      const correctTexts = opts.filter(o => o.correct).map(o => o.text);
+      for (let i = opts.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [opts[i], opts[j]] = [opts[j], opts[i]];
+      }
+      q.options = opts;
+      // correct уже внутри опций, ничего восстанавливать не надо
+    });
+  }
+
+  const startedAt = new Date().toISOString();
+  const endsAt = test.timeLimit > 0
+    ? Date.now() + test.timeLimit * 1000
+    : null;
+
+  currentTestRun = {
+    testId,
+    test,
+    questions,
+    startedAt,
+    endsAt,
+    currentIndex: 0,
+    answers: {},       // { [questionIndex]: [selectedOptionIndexes] }
+    timerId: null
+  };
+
+  location.hash = '#/test-run';
+}
+
+// ---------- Страница прохождения ----------
+function renderTestRun() {
+  if (!currentTestRun) {
+    return `
+      <h2>Тест не запущен</h2>
+      <p class="doc-meta">Вернись к списку тестов.</p>
+      <button class="btn" onclick="location.hash='#/tests'">← К списку тестов</button>
+    `;
+  }
+
+  const run = currentTestRun;
+  const total = run.questions.length;
+  const q = run.questions[run.currentIndex];
+  const selected = run.answers[run.currentIndex] || [];
+  const isLast = run.currentIndex === total - 1;
+  const progress = Math.round(((run.currentIndex + 1) / total) * 100);
+
+  const timerHtml = run.endsAt
+    ? `<div class="test-timer" id="testTimer">⏱ —</div>`
+    : '';
+
+  const imageHtml = q.image
+    ? `<div class="test-image-wrap">
+        <img src="${escapeHtml(q.image)}" alt="" class="test-image"
+             onerror="this.parentElement.innerHTML='<div class=&quot;test-image-error&quot;>Изображение недоступно</div>'">
+      </div>`
+    : '';
+
+  // Определяем режим: один правильный → radio, несколько → checkbox
+  const correctCount = q.options.filter(o => o.correct).length;
+  const isMulti = correctCount > 1;
+  const inputType = isMulti ? 'checkbox' : 'radio';
+
+  const optionsHtml = q.options.map((o, i) => `
+    <label class="option ${selected.includes(i) ? 'selected' : ''}" data-opt-idx="${i}">
+      <input type="${inputType}" name="q-opt" value="${i}" ${selected.includes(i) ? 'checked' : ''}>
+      ${escapeHtml(o.text)}
+    </label>
+  `).join('');
+
+  setTimeout(() => {
+    // Обработчики выбора
+    document.querySelectorAll('input[name="q-opt"]').forEach(inp => {
+      inp.onchange = () => {
+        const idx = parseInt(inp.value, 10);
+
+        if (inputType === 'checkbox') {
+          // Множественный выбор — работаем с массивом
+          let current = run.answers[run.currentIndex] || [];
+          if (inp.checked) {
+            if (!current.includes(idx)) current = [...current, idx];
+          } else {
+            current = current.filter(v => v !== idx);
+          }
+          run.answers[run.currentIndex] = current.sort((a,b) => a-b);
+        } else {
+          // Одиночный — заменяем целиком
+          run.answers[run.currentIndex] = [idx];
+          document.querySelectorAll('.option').forEach(o => o.classList.remove('selected'));
+        }
+
+        // Обновляем визуальную подсветку
+        inp.closest('.option').classList.toggle('selected', inp.checked);
+      };
+    });
+    // Кнопка далее/завершить
+    document.getElementById('btnNextQ').onclick = () => {
+      if (!run.answers[run.currentIndex]) {
+        return toast('Выбери ответ', 'err');
+      }
+      if (isLast) {
+        finishTestRun();
+      } else {
+        run.currentIndex++;
+        render();  // ⬅️ перерисовка напрямую
+      }
+    };
+
+    // Таймер
+    if (run.endsAt) {
+      startTestTimer();
+    }
+  }, 0);
+
+  return `
+    <div class="test-header">
+      <div class="test-progress-info">
+        Вопрос <strong>${run.currentIndex + 1}</strong> из <strong>${total}</strong>
+      </div>
+      ${timerHtml}
+    </div>
+    <div class="test-progress-bar">
+      <div class="test-progress-fill" style="width:${progress}%"></div>
+    </div>
+
+    <div class="question">
+      <p>${run.currentIndex + 1}. ${escapeHtml(q.text)}</p>
+      ${imageHtml}
+      <div class="test-options">
+        ${optionsHtml}
+      </div>
+    </div>
+
+    <button class="btn" id="btnNextQ" style="margin-top:16px">
+      ${isLast ? '🏁 Завершить тест' : 'Следующий →'}
+    </button>
+  `;
+}
+
+// ---------- Таймер прохождения ----------
+function startTestTimer() {
+  const run = currentTestRun;
+  if (!run || !run.endsAt) return;
+  if (run.timerId) clearInterval(run.timerId);
+
+  const update = () => {
+    const el = document.getElementById('testTimer');
+    if (!el) return;
+    const left = Math.max(0, Math.floor((run.endsAt - Date.now()) / 1000));
+    const m = Math.floor(left / 60);
+    const s = left % 60;
+    el.textContent = `⏱ ${m}:${s.toString().padStart(2,'0')}`;
+    el.classList.toggle('warning', left <= 60);
+    if (left <= 0) {
+      clearInterval(run.timerId);
+      run.timerId = null;
+      toast('Время вышло! Тест завершён автоматически', 'err');
+      finishTestRun();
+    }
+  };
+  update();
+  run.timerId = setInterval(update, 1000);
+}
+
+// ---------- Завершение теста ----------
+async function finishTestRun() {
+  const run = currentTestRun;
+  if (!run) return;
+
+  if (run.timerId) {
+    clearInterval(run.timerId);
+    run.timerId = null;
+  }
+
+  const total = run.questions.length;
+  let score = 0;
+  const answerLog = [];
+
+  run.questions.forEach((q, idx) => {
+    const selected = run.answers[idx] || [];
+    const correctIdxs = q.options
+      .map((o, i) => o.correct ? i : -1)
+      .filter(i => i >= 0);
+
+    // Правильно, если выбраны ВСЕ правильные и НИ ОДИН неправильный
+    const sortedSel = [...selected].sort((a,b) => a-b);
+    const sortedCor = [...correctIdxs].sort((a,b) => a-b);
+    const isCorrect =
+      sortedSel.length === sortedCor.length &&
+      sortedSel.every((v, i) => v === sortedCor[i]);
+
+    if (isCorrect) score++;
+
+    answerLog.push({
+      questionId: q.id,
+      questionText: q.text,
+      selectedOptions: selected.map(i => q.options[i]?.text || ''),
+      correctOptions: correctIdxs.map(i => q.options[i]?.text || ''),
+      isCorrect
+    });
+  });
+
+  const percent = total > 0 ? Math.round((score / total) * 100) : 0;
+  const passed = percent >= (run.test.passScore || 80);
+
+  const resultId = await saveTestResultAndGetId(
+    run.test, answerLog, score, total, percent, passed, run.startedAt
+  );
+
+  currentTestRun = null;
+  location.hash = '#/test-result/' + resultId;
+}
+
+async function saveTestResultAndGetId(test, answers, score, total, percent, passed, startedAt) {
+  const ref = await addDoc(collection(db,'testResults'), {
+    testId: test.id,
+    testTitle: test.title,
+    userId: currentUser.uid,
+    userNick: currentProfile.nickname,
+    userRank: currentProfile.rank,
+    score,
+    total,
+    percent,
+    passed,
+    answers,
+    startedAt: startedAt || new Date().toISOString(),
+    finishedAt: serverTimestamp(),
+    audience: test.audience || 'all',
+    testQuestionsEditedAt: test.questionsEditedAt || null   // ⬅️ НОВОЕ ПОЛЕ
+  });
+  return ref.id;
+}
+
+// Проверяет, был ли тест изменён после прохождения
+function isTestOutdated(result) {
+  if (!result.testQuestionsEditedAt) return false;    // старая запись — не знаем
+  const test = cachedTests.find(t => t.id === result.testId);
+  if (!test || !test.questionsEditedAt) return false;
+  return new Date(test.questionsEditedAt) > new Date(result.testQuestionsEditedAt);
+}
+
+// ---------- Страница результата ----------
+function renderTestResult(resultId) {
+  setTimeout(() => {
+    const box = document.getElementById('testResultBox');
+    if (!box) return;
+
+    const r = cachedTestResults.find(x => x.id === resultId);
+    if (!r) {
+      box.innerHTML = '<p class="doc-meta">Загрузка результата...</p>';
+      setTimeout(() => renderTestResult(resultId), 500);
+      return;
+    }
+
+    // Проверка прав: свой результат или Полковник+
+    const canViewDetails = r.userId === currentUser.uid || lvl(currentProfile.rank) >= 13;
+
+    const answersHtml = (canViewDetails && r.answers) ? `
+      <h3 class="profile-section-title">📋 Разбор ответов</h3>
+      ${r.answers.map((a, i) => `
+        <div class="test-review-item ${a.isCorrect ? 'correct' : 'wrong'}">
+          <div class="test-review-head">
+            <span>${i+1}. ${escapeHtml(a.questionText)}</span>
+            <span class="test-review-icon">${a.isCorrect ? '✅' : '❌'}</span>
+          </div>
+          <div class="test-review-answers">
+            <div>Твой ответ: <span class="${a.isCorrect ? 'ok' : 'err'}">${a.selectedOptions.map(escapeHtml).join(', ') || '— не отвечено —'}</span></div>
+            ${!a.isCorrect ? `<div>Правильно: <span class="ok">${a.correctOptions.map(escapeHtml).join(', ')}</span></div>` : ''}
+          </div>
+        </div>
+      `).join('')}
+    ` : '';
+
+    const outdated = isTestOutdated(r);
+
+    box.innerHTML = `
+      ${outdated ? `
+        <div class="test-outdated-notice">
+          ⚠️ <strong>Тест был изменён после этой попытки.</strong><br>
+          Вопросы могли поменяться — актуальность разбора ниже может быть под вопросом.
+        </div>
+      ` : ''}
+
+      <div class="result ${r.passed ? 'pass' : 'fail'}" style="margin-bottom:20px">
+        ${r.passed ? '✅ ТЕСТ ПРОЙДЕН' : '❌ ТЕСТ НЕ ПРОЙДЕН'}<br>
+        <span style="font-size:24px">${r.score}/${r.total} (${r.percent}%)</span>
+        <div style="font-size:13px;margin-top:8px;opacity:.8">
+          Тест: ${escapeHtml(r.testTitle)}
+        </div>
+      </div>
+      <div class="doc-meta">Проходной балл: ${r.percent >= 0 ? 'см. тест' : '—'} · ${fmtDate(r.finishedAt)}</div>
+
+      ${answersHtml}
+
+      <div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn" id="btnBackToTests">← К списку тестов</button>
+        <button class="btn secondary" id="btnRetakeTest" data-test-id="${r.testId}">🔄 Пройти заново</button>
+      </div>
+    `;
+
+    document.getElementById('btnBackToTests')?.addEventListener('click', () => {
+      location.hash = '#/tests';
+    });
+    document.getElementById('btnRetakeTest')?.addEventListener('click', (e) => {
+      startTestRun(e.currentTarget.dataset.testId);
+    });
+  }, 0);
+
+  return `
+    <h2>Результат теста</h2>
+    <div id="testResultBox"><p class="doc-meta">Загрузка...</p></div>
+  `;
+}
+
+// ---------- История результатов теста ----------
+function renderTestHistory(testId) {
+  if (lvl(currentProfile.rank) < 13 && !canManageTests(currentProfile)) {
+    return `<h2>Доступ запрещён</h2>`;
+  }
+
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return `<h2>Тест не найден</h2>`;
+
+  // Считаем границу периода
+  const now = Date.now();
+  let periodStart = 0;
+  if (testHistoryFilters.period === 'today') {
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    periodStart = d.getTime();
+  } else if (testHistoryFilters.period === 'week') {
+    periodStart = now - 7 * 24 * 3600 * 1000;
+  } else if (testHistoryFilters.period === 'month') {
+    periodStart = now - 30 * 24 * 3600 * 1000;
+  }
+
+  const toMs = r => {
+    const t = r.finishedAt;
+    return t?.toDate ? t.toDate().getTime() : new Date(t || 0).getTime();
+  };
+
+  // Фильтруем
+  let results = testResultsFor(testId).filter(r => {
+    if (testHistoryFilters.status === 'pass' && !r.passed) return false;
+    if (testHistoryFilters.status === 'fail' && r.passed) return false;
+    if (periodStart && toMs(r) < periodStart) return false;
+    if (testHistoryFilters.search) {
+      const q = testHistoryFilters.search.toLowerCase();
+      if (!(r.userNick || '').toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Сортируем
+  if (testHistorySort === 'date') {
+    results.sort((a,b) => toMs(b) - toMs(a));
+  } else if (testHistorySort === 'score') {
+    results.sort((a,b) => (b.percent || 0) - (a.percent || 0));
+  } else if (testHistorySort === 'name') {
+    results.sort((a,b) => (a.userNick || '').localeCompare(b.userNick || '', 'ru'));
+  }
+
+  // Общая статистика (по всем, не по фильтру)
+  const allResults = testResultsFor(testId);
+  const passedCount = allResults.filter(r => r.passed).length;
+  const failCount = allResults.length - passedCount;
+
+  setTimeout(() => {
+    // Поиск по имени
+    const searchInput = document.getElementById('testHistorySearch');
+    if (searchInput) {
+      searchInput.value = testHistoryFilters.search;
+      searchInput.oninput = (e) => {
+        testHistoryFilters.search = e.target.value;
+        // Перерисовываем только список, без сброса фокуса
+        refreshTestHistoryList(testId);
+      };
+    }
+
+    // Фильтр по статусу
+    document.querySelectorAll('[data-th-status]').forEach(b => {
+      b.onclick = () => {
+        testHistoryFilters.status = b.dataset.thStatus;
+        render();
+      };
+    });
+
+    // Фильтр по периоду
+    document.querySelectorAll('[data-th-period]').forEach(b => {
+      b.onclick = () => {
+        testHistoryFilters.period = b.dataset.thPeriod;
+        render();
+      };
+    });
+
+    // Сортировка
+    const sortSel = document.getElementById('testHistorySort');
+    if (sortSel) {
+      sortSel.value = testHistorySort;
+      sortSel.onchange = () => {
+        testHistorySort = sortSel.value;
+        render();
+      };
+    }
+
+    // Клик на строку → детали
+    document.querySelectorAll('[data-test-result-id]').forEach(row => {
+      row.onclick = () => showTestResultDetails(row.dataset.testResultId);
+    });
+
+    // Кнопка сброса фильтров
+    document.getElementById('testHistoryReset')?.addEventListener('click', () => {
+      testHistoryFilters = { search: '', status: 'all', period: 'all' };
+      testHistorySort = 'date';
+      render();
+    });
+  }, 0);
+
+  return `
+    <button class="btn secondary" style="margin-bottom:16px" onclick="location.hash='#/tests'">← К списку тестов</button>
+    <h2>📊 Результаты теста</h2>
+    <p class="doc-meta">${escapeHtml(test.title)}</p>
+
+    <div class="counter-bar">
+      <span>Всего попыток: <strong>${allResults.length}</strong></span>
+      <span>Прошли: <strong style="color:var(--ok)">${passedCount}</strong></span>
+      <span>Не прошли: <strong style="color:var(--danger)">${failCount}</strong></span>
+      <span>Показано: <strong>${results.length}</strong></span>
+    </div>
+
+    <div class="test-history-filters">
+      <div class="form-group" style="margin-bottom:10px">
+        <input id="testHistorySearch" type="text" placeholder="🔍 Поиск по имени...">
+      </div>
+
+      <div class="test-history-filter-row">
+        <div class="test-history-filter-group">
+          <span class="th-label">Статус:</span>
+          <button class="th-btn ${testHistoryFilters.status === 'all' ? 'active' : ''}" data-th-status="all">Все</button>
+          <button class="th-btn ${testHistoryFilters.status === 'pass' ? 'active' : ''}" data-th-status="pass">✅ Прошли</button>
+          <button class="th-btn ${testHistoryFilters.status === 'fail' ? 'active' : ''}" data-th-status="fail">❌ Не прошли</button>
+        </div>
+
+        <div class="test-history-filter-group">
+          <span class="th-label">Период:</span>
+          <button class="th-btn ${testHistoryFilters.period === 'all' ? 'active' : ''}" data-th-period="all">Всё</button>
+          <button class="th-btn ${testHistoryFilters.period === 'today' ? 'active' : ''}" data-th-period="today">Сегодня</button>
+          <button class="th-btn ${testHistoryFilters.period === 'week' ? 'active' : ''}" data-th-period="week">Неделя</button>
+          <button class="th-btn ${testHistoryFilters.period === 'month' ? 'active' : ''}" data-th-period="month">Месяц</button>
+        </div>
+
+        <div class="test-history-filter-group">
+          <span class="th-label">Сортировка:</span>
+          <select id="testHistorySort" class="th-select">
+            <option value="date">По дате (новые)</option>
+            <option value="score">По баллу (высокие)</option>
+            <option value="name">По имени (А→Я)</option>
+          </select>
+        </div>
+
+        <button class="btn secondary" id="testHistoryReset" style="width:auto;padding:6px 14px;font-size:12px">↺ Сброс</button>
+      </div>
+    </div>
+
+    <div id="testHistoryList">
+      ${renderTestHistoryList(testId, results)}
+    </div>
+  `;
+}
+
+// Отдельная функция рендера списка (для перерисовки при поиске)
+function renderTestHistoryList(testId, results) {
+  if (results.length === 0) {
+    return '<p class="doc-meta">По выбранным фильтрам ничего не найдено.</p>';
+  }
+  return results.map(r => {
+    const outdated = isTestOutdated(r);
+    return `
+      <div class="test-history-row ${r.passed ? 'pass' : 'fail'} ${outdated ? 'outdated' : ''}" data-test-result-id="${r.id}" style="cursor:pointer">
+        <div class="test-history-user">
+          <strong>${escapeHtml(r.userNick)}</strong>
+          <span class="test-history-rank">${escapeHtml(r.userRank || '')}</span>
+          ${outdated ? '<span class="test-outdated-badge">⚠️ устарело</span>' : ''}
+        </div>
+        <div class="test-history-score">
+          ${r.passed ? '✅' : '❌'} ${r.score}/${r.total} (${r.percent}%)
+        </div>
+        <div class="test-history-date">${fmtDate(r.finishedAt)}</div>
+        <div class="test-history-arrow">›</div>
+      </div>
+    `;
+  }).join('');
+}
+
+// Модалка с полным разбором попытки
+function showTestResultDetails(resultId) {
+  const r = cachedTestResults.find(x => x.id === resultId);
+  if (!r) return toast('Результат не найден', 'err');
+
+  const answersHtml = (r.answers && r.answers.length) ? r.answers.map((a, i) => `
+    <div class="test-review-item ${a.isCorrect ? 'correct' : 'wrong'}">
+      <div class="test-review-head">
+        <span>${i+1}. ${escapeHtml(a.questionText)}</span>
+        <span class="test-review-icon">${a.isCorrect ? '✅' : '❌'}</span>
+      </div>
+      <div class="test-review-answers">
+        <div>Ответ: <span class="${a.isCorrect ? 'ok' : 'err'}">${
+          a.selectedOptions.length
+            ? a.selectedOptions.map(escapeHtml).join(', ')
+            : '— не отвечено —'
+        }</span></div>
+        ${!a.isCorrect
+          ? `<div>Правильно: <span class="ok">${a.correctOptions.map(escapeHtml).join(', ')}</span></div>`
+          : ''}
+      </div>
+    </div>
+  `).join('') : '<p class="doc-meta">Детали ответов недоступны.</p>';
+
+  openModal(`
+    <h3>${r.passed ? '✅ Тест пройден' : '❌ Тест не пройден'}</h3>
+    <p class="modal-sub">
+      <strong>${escapeHtml(r.userNick)}</strong>
+      <span style="color:var(--accent)"> · ${escapeHtml(r.userRank || '')}</span><br>
+      ${fmtDate(r.finishedAt)} · ${r.score}/${r.total} (${r.percent}%)
+    </p>
+    <div style="max-height:60vh;overflow-y:auto;padding-right:6px">
+      ${answersHtml}
+    </div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Закрыть</button>
+    </div>
+  `, (overlay, close) => {
+    overlay.querySelector('[data-close]').onclick = close;
+  });
+}
+
+// Быстрая перерисовка только списка (без полного render)
+function refreshTestHistoryList(testId) {
+  const test = cachedTests.find(t => t.id === testId);
+  if (!test) return;
+
+  const now = Date.now();
+  let periodStart = 0;
+  if (testHistoryFilters.period === 'today') {
+    const d = new Date(); d.setHours(0,0,0,0); periodStart = d.getTime();
+  } else if (testHistoryFilters.period === 'week') {
+    periodStart = now - 7 * 24 * 3600 * 1000;
+  } else if (testHistoryFilters.period === 'month') {
+    periodStart = now - 30 * 24 * 3600 * 1000;
+  }
+
+  const toMs = r => {
+    const t = r.finishedAt;
+    return t?.toDate ? t.toDate().getTime() : new Date(t || 0).getTime();
+  };
+
+  let results = testResultsFor(testId).filter(r => {
+    if (testHistoryFilters.status === 'pass' && !r.passed) return false;
+    if (testHistoryFilters.status === 'fail' && r.passed) return false;
+    if (periodStart && toMs(r) < periodStart) return false;
+    if (testHistoryFilters.search) {
+      const q = testHistoryFilters.search.toLowerCase();
+      if (!(r.userNick || '').toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  if (testHistorySort === 'date') {
+    results.sort((a,b) => toMs(b) - toMs(a));
+  } else if (testHistorySort === 'score') {
+    results.sort((a,b) => (b.percent || 0) - (a.percent || 0));
+  } else if (testHistorySort === 'name') {
+    results.sort((a,b) => (a.userNick || '').localeCompare(b.userNick || '', 'ru'));
+  }
+
+  const listEl = document.getElementById('testHistoryList');
+  if (listEl) {
+    listEl.innerHTML = renderTestHistoryList(testId, results);
+    // Переподключаем обработчики
+    listEl.querySelectorAll('[data-test-result-id]').forEach(row => {
+      row.onclick = () => showTestResultDetails(row.dataset.testResultId);
+    });
+  }
 }
 
 /* ==================== ПОИСК ==================== */
@@ -986,8 +4842,16 @@ function render() {
   else if (hash.startsWith('#/doc/'))   content.innerHTML = renderDoc(hash.slice(6));
   else if (hash === '#/reports')   content.innerHTML = renderReports();
   else if (hash === '#/tests')     content.innerHTML = renderTests();
-  else if (hash.startsWith('#/test/'))  content.innerHTML = renderTest(hash.slice(7));
+  else if (hash === '#/test-run')  content.innerHTML = renderTestRun();
+  else if (hash.startsWith('#/test-result/')) content.innerHTML = renderTestResult(hash.replace('#/test-result/',''));
+  else if (hash.startsWith('#/test-history/')) content.innerHTML = renderTestHistory(hash.replace('#/test-history/',''));
+  else if (hash.startsWith('#/test-editor/')) content.innerHTML = renderTestEditor(hash.replace('#/test-editor/',''));
+  else if (hash === '#/registry')              content.innerHTML = renderRegistry('detentions');
+  else if (hash.startsWith('#/registry/'))     content.innerHTML = renderRegistry(hash.replace('#/registry/',''));
   else if (hash === '#/staff')     content.innerHTML = renderStaff();
+  else if (hash.startsWith('#/profile/')) content.innerHTML = renderProfile(hash.replace('#/profile/',''));
+  else if (hash === '#/dashboard')  content.innerHTML = renderDashboard();
+  else if (hash === '#/announcements') content.innerHTML = renderAnnouncements();
   else if (hash === '#/invites')   content.innerHTML = renderInvites();
   else if (hash === '#/passwords') content.innerHTML = renderResets();
   else content.innerHTML = `<h2>Страница не найдена</h2>`;
@@ -1021,10 +4885,35 @@ window.addEventListener('hashchange', render);
 onAuthStateChanged(auth, async user => {
   if (user) {
     currentUser = user;
-    let profile = await loadProfile(user.uid);
-    if (!profile) {
-      await new Promise(r => setTimeout(r, 800));
+    let profile = null;
+    try {
       profile = await loadProfile(user.uid);
+      if (!profile) {
+        await new Promise(r => setTimeout(r, 800));
+        profile = await loadProfile(user.uid);
+      }
+    } catch (err) {
+      console.error('Ошибка связи с Firebase:', err);
+      // Показываем понятное сообщение вместо вечной загрузки
+      const pl = document.getElementById('preloader');
+      if (pl) {
+        pl.innerHTML = `
+          <div class="preloader-content" style="text-align:center">
+            <div class="preloader-badge">
+              <div class="preloader-star" style="background:var(--danger);color:#fff">!</div>
+            </div>
+            <div class="preloader-title" style="color:var(--danger)">НЕТ СВЯЗИ С СЕРВЕРОМ</div>
+            <div class="preloader-sub" style="max-width:420px;margin:12px auto 20px;line-height:1.6">
+              Не удаётся подключиться к базе данных.<br>
+              Проверь интернет, отключи VPN/AdBlock и попробуй снова.
+            </div>
+            <button class="btn" onclick="location.reload()" style="min-width:180px">
+              🔄 Обновить
+            </button>
+          </div>
+        `;
+      }
+      return;
     }
     if (!profile) { await signOut(auth); return; }
     if (profile.status === 'fired') {
@@ -1043,6 +4932,21 @@ onAuthStateChanged(auth, async user => {
     subscribeUsers();
     if (canManageStaff(profile)) subscribeInvites();
     if (canResetPasswords(profile)) subscribeResets();
+    if (isPolice(profile) || canReview(profile) || canManageStaff(profile)) {
+      subscribeDetentions();
+      subscribeFines();
+    }
+    if (canManageStaff(profile)) {
+      subscribeReportsGlobal();
+      subscribeDashboardConfig();
+    }
+    if (isPolice(profile) || canReview(profile) || canManageStaff(profile)) {
+      subscribeAnnouncements();
+    }
+    // Тесты — подписка для всех авторизованных
+    subscribeTests();
+    // Результаты — подписка для ВСЕХ, чтобы каждый видел свой результат
+    subscribeTestResults();
     render();
     hidePreloader('Добро пожаловать');
   } else {
@@ -1050,9 +4954,202 @@ onAuthStateChanged(auth, async user => {
     if (reportsUnsub) { reportsUnsub(); reportsUnsub = null; }
     if (invitesUnsub) { invitesUnsub(); invitesUnsub = null; }
     if (resetsUnsub) { resetsUnsub(); resetsUnsub = null; }
+    if (detentionsUnsub) { detentionsUnsub(); detentionsUnsub = null; }
+    if (finesUnsub) { finesUnsub(); finesUnsub = null; }
+    if (reportsGlobalUnsub) { reportsGlobalUnsub(); reportsGlobalUnsub = null; }
+    if (dashboardConfigUnsub) { dashboardConfigUnsub(); dashboardConfigUnsub = null; }
+    if (announcementsUnsub) { announcementsUnsub(); announcementsUnsub = null; }
+    if (testsUnsub) { testsUnsub(); testsUnsub = null; }
+    if (testResultsUnsub) { testResultsUnsub(); testResultsUnsub = null; }
+    if (currentTestRun && currentTestRun.timerId) {
+      clearInterval(currentTestRun.timerId);
+      currentTestRun = null;
+    }
     document.getElementById('authScreen').classList.remove('hidden');
     document.getElementById('appScreen').classList.add('hidden');
 
     hidePreloader('Авторизация');
+  }
+});
+
+/* ==================== ГОРЯЧИЕ КЛАВИШИ ==================== */
+(function initHotkeys() {
+  document.addEventListener('keydown', e => {
+    // Пропускаем, если пользователь печатает в поле ввода
+    const tag = (e.target.tagName || '').toLowerCase();
+    const isTyping = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
+
+    // ---- ESC: закрывает модалку (работает всегда) ----
+    if (e.key === 'Escape') {
+      const overlay = document.querySelector('.modal-overlay');
+      if (overlay) {
+        overlay.style.transition = 'opacity .15s';
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.remove(), 150);
+        e.preventDefault();
+        return;
+      }
+      // Если модалки нет — снимаем фокус с поля ввода
+      if (isTyping) {
+        e.target.blur();
+        return;
+      }
+    }
+
+    // ---- Остальные клавиши — только если НЕ печатаешь ----
+    if (isTyping) return;
+
+    // Пропускаем, если открыта модалка (не мешаем закрывать Esc)
+    if (document.querySelector('.modal-overlay')) return;
+
+    // ---- "/" — фокус на поиск ----
+    if (e.key === '/') {
+      const searchInput = document.getElementById('globalSearch');
+      if (searchInput) {
+        e.preventDefault();
+        searchInput.focus();
+        searchInput.select();
+      }
+      return;
+    }
+
+    // ---- Alt+H / Alt+R / Alt+S ----
+    if (e.altKey && !e.ctrlKey && !e.shiftKey) {
+      const key = e.key.toLowerCase();
+      if (key === 'h') {
+        e.preventDefault();
+        location.hash = '#/home';
+        return;
+      }
+      if (key === 'r') {
+        if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
+          e.preventDefault();
+          location.hash = '#/reports';
+        }
+        return;
+      }
+      if (key === 's') {
+        if (isPolice(currentProfile) || canManageStaff(currentProfile)) {
+          e.preventDefault();
+          location.hash = '#/staff';
+        }
+        return;
+      }
+    }
+  });
+})();
+
+/* ==================== КОПИРОВАНИЕ В БУФЕР ==================== */
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('[data-copy]');
+  if (!btn) return;
+  const text = btn.dataset.copy;
+  try {
+    await navigator.clipboard.writeText(text);
+    // Кратковременно меняем иконку на галочку
+    const original = btn.textContent;
+    btn.textContent = '✓';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }, 1200);
+    toast('Код скопирован: ' + text);
+  } catch (err) {
+    // Fallback для браузеров без clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      toast('Код скопирован: ' + text);
+    } catch (e2) {
+      toast('Не удалось скопировать', 'err');
+    }
+    document.body.removeChild(ta);
+  }
+});
+
+/* ==================== ФИЛЬТР ПО КОДЕКСУ (УК/АК) ==================== */
+document.addEventListener('click', e => {
+  const tab = e.target.closest('[data-law-type]');
+  if (!tab) return;
+  const [stateKey, type] = tab.dataset.lawType.split(':');
+  lawTypeFilter[stateKey] = type;
+
+  // Обновляем активные табы
+  document.querySelectorAll(`[data-law-type^="${stateKey}:"]`).forEach(t => {
+    t.classList.toggle('active', t.dataset.lawType === `${stateKey}:${type}`);
+  });
+
+  // Очищаем результаты поиска (они больше неактуальны)
+  const resultsId = stateKey === 'detentions' ? 'd-articles-results' : 'f-articles-results';
+  const resultsBox = document.getElementById(resultsId);
+  if (resultsBox) resultsBox.innerHTML = '';
+
+  // Если что-то было введено — пересчитываем заново
+  const inputId = stateKey === 'detentions' ? 'd-articles-search' : 'f-articles-search';
+  const input = document.getElementById(inputId);
+  if (input && input.value.trim()) {
+    updateLawResults(inputId, resultsId, stateKey);
+  }
+});
+
+/* ==================== ПРЕДУПРЕЖДЕНИЕ О ВЫХОДЕ ИЗ ТЕСТА ==================== */
+window.addEventListener('beforeunload', e => {
+  if (currentTestRun) {
+    e.preventDefault();
+    e.returnValue = 'Тест не завершён. Точно уйти? Прогресс потеряется.';
+    return e.returnValue;
+  }
+});
+
+/* ==================== МОБИЛЬНОЕ МЕНЮ ==================== */
+(function initMobileMenu() {
+  const hamburger = document.getElementById('hamburger');
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebarOverlay');
+
+  if (!hamburger || !sidebar) return;
+
+  const closeSidebar = () => {
+    sidebar.classList.remove('open');
+    overlay?.classList.remove('active');
+  };
+
+  hamburger.addEventListener('click', () => {
+    const isOpen = sidebar.classList.toggle('open');
+    if (isOpen) overlay?.classList.add('active');
+    else overlay?.classList.remove('active');
+  });
+
+  overlay?.addEventListener('click', closeSidebar);
+
+  document.getElementById('nav')?.addEventListener('click', e => {
+    if (e.target.classList.contains('nav-link') && window.innerWidth <= 820) closeSidebar();
+  });
+
+  window.addEventListener('hashchange', () => {
+    if (window.innerWidth <= 820) closeSidebar();
+  });
+
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 820) closeSidebar();
+  });
+})();
+
+// Обработчик крестика для очистки поиска статей
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-clear-for]');
+  if (!btn) return;
+  const inputId = btn.dataset.clearFor;
+  const input = document.getElementById(inputId);
+  if (input) {
+    input.value = '';
+    input.focus();
+    input.dispatchEvent(new Event('input')); // запустить существующий обработчик
   }
 });

@@ -23,7 +23,7 @@
   <div class="preloader-content">
     <div class="preloader-badge">
       <div class="preloader-ring"></div>
-      <div class="preloader-star">★</div>
+      <div class="preloader-star preloader-logo"><img src="logo.png" alt="PPD"></div>
     </div>
     <div class="preloader-title">POLICE DEPARTMENT</div>
     <div class="preloader-sub">Genius Sculptor RolePlay</div>
@@ -35,7 +35,7 @@
 <!-- ===== ЭКРАН ВХОДА ===== -->
 <div id="authScreen" class="auth-screen">
   <div class="auth-box">
-    <div class="badge big">★</div>
+    <div class="badge big badge-logo"><img src="logo.png" alt="PPD"></div>
     <h2>POLICE DEPARTMENT</h2>
     <p class="doc-meta">Genius Sculptor RolePlay</p>
 
@@ -79,8 +79,9 @@
 <!-- ===== ОСНОВНОЙ САЙТ ===== -->
 <div id="appScreen" class="hidden">
   <header class="topbar">
+    <button class="hamburger" id="hamburger" aria-label="Меню">☰</button>
     <div class="brand">
-      <div class="badge">★</div>
+      <div class="badge badge-logo"><img src="logo.png" alt="PPD"></div> 
       <div>
         <h1>POLICE DEPARTMENT</h1>
         <span class="sub">Genius Sculptor RolePlay</span>
@@ -107,6 +108,8 @@
     © <span id="year"></span> PPD · Внутренний портал фракции
   </footer>
 </div>
+
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
 
 <script type="module" src="app.js"></script>
 </body>
