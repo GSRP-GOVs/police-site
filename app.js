@@ -3233,6 +3233,10 @@ function renderStaff() {
         removeWarning(uid, wid);
       };
     });
+    // Открытие раздела Приглашения
+    document.getElementById('btnOpenInvites')?.addEventListener('click', () => {
+      location.hash = '#/invites';
+    });
   }, 0);
 
   return html;
@@ -3244,6 +3248,14 @@ function renderInvites() {
   const myRoles = rolesIAssignViaInvite(currentProfile);
   const canCreate = myRoles.length > 0;
   const now = Date.now();
+
+  // Обработчики (навешиваются после рендера)
+  setTimeout(() => {
+    document.getElementById('btnCreateInvite')?.addEventListener('click', createInvite);
+    document.querySelectorAll('[data-delinv]').forEach(b => {
+      b.onclick = () => deleteInvite(b.dataset.delinv);
+    });
+  }, 0);
 
   return `
     <button class="btn secondary" style="margin-bottom:16px" onclick="location.hash='#/staff'">← Назад к Кадрам</button>
@@ -3309,10 +3321,6 @@ function renderInvites() {
     </div>
   `;
 }
-document.addEventListener('click', e => {
-  if (e.target.id === 'btnCreateInvite') createInvite();
-  if (e.target.dataset?.delinv) deleteInvite(e.target.dataset.delinv);
-});
 
 function renderResets() {
   if (!canResetPasswords(currentProfile)) return `<h2>Доступ запрещён</h2>`;
