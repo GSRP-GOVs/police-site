@@ -3699,3 +3699,191 @@ input.at-limit {
   letter-spacing: .5px;
   vertical-align: middle;
 }
+
+/* ===== Мультивыбор напарников ===== */
+.partner-add-select {
+  margin-bottom: 8px;
+}
+.partner-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  min-height: 40px;
+  background: var(--bg-3);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.partner-empty {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+.partner-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 12px;
+  border-radius: 14px;
+  background: rgba(74,144,226,.15);
+  border: 1px solid rgba(74,144,226,.4);
+  color: var(--accent-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.partner-chip em {
+  font-style: normal;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+  margin-left: 2px;
+}
+.partner-chip button {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(74,144,226,.2);
+  color: var(--accent-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.partner-chip button:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ===== История карьеры ===== */
+.history-reason {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #c8d4e6;
+  background: var(--bg-3);
+  padding: 6px 10px;
+  border-radius: 6px;
+  border-left: 2px solid var(--muted);
+}
+
+/* ===== Баннер "Уволен" ===== */
+.fired-banner {
+  background: linear-gradient(135deg, rgba(231,76,60,.15), rgba(231,76,60,.05));
+  border: 2px solid var(--danger);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 0 25px rgba(231,76,60,.2);
+}
+.fired-banner-title {
+  color: var(--danger);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  margin-bottom: 12px;
+  text-align: center;
+}
+.fired-banner-info {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text);
+}
+.fired-banner-info strong { color: var(--danger); }
+
+/* ===== Уведомление об увольнении ===== */
+.fired-notice-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  background: rgba(5, 8, 16, .92);
+  backdrop-filter: blur(8px);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  animation: fadeIn .3s;
+}
+
+.fired-notice {
+  width: 100%;
+  max-width: 460px;
+  background: linear-gradient(135deg, #1a0f0f 0%, #2a1212 100%);
+  border: 2px solid var(--danger);
+  border-radius: 16px;
+  padding: 28px 24px;
+  box-shadow: 0 0 60px rgba(231,76,60,.5), 0 20px 60px rgba(0,0,0,.6);
+  text-align: center;
+  animation: firedNoticeIn .4s cubic-bezier(.18,.89,.32,1.28);
+}
+
+@keyframes firedNoticeIn {
+  from { transform: scale(.8); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+.fired-notice-icon {
+  font-size: 56px;
+  margin-bottom: 8px;
+  animation: firedNoticePulse 1.5s ease-in-out infinite;
+}
+@keyframes firedNoticePulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.1); }
+}
+
+.fired-notice-title {
+  color: var(--danger);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  margin-bottom: 20px;
+  border: none;
+  padding: 0;
+  display: block;
+}
+
+.fired-notice-body {
+  text-align: left;
+  background: rgba(0,0,0,.3);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 8px;
+}
+
+.fired-notice-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed rgba(231,76,60,.2);
+  font-size: 14px;
+}
+.fired-notice-row:last-child { border-bottom: none; }
+
+.fired-notice-label {
+  color: var(--muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.fired-notice-value {
+  color: var(--text);
+  font-weight: 600;
+  text-align: right;
+  word-break: break-word;
+}
+.fired-notice-value em {
+  font-style: normal;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+@media (max-width: 480px) {
+  .fired-notice { padding: 22px 16px; }
+  .fired-notice-title { font-size: 18px; letter-spacing: 2px; }
+  .fired-notice-icon { font-size: 46px; }
+  .fired-notice-row { flex-direction: column; gap: 4px; }
+  .fired-notice-value { text-align: left; }
+}

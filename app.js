@@ -39,7 +39,9 @@ let cachedInvites = [];
 let staffSort = 'rank'; // 'rank' | 'name' | 'warnings' | 'status'
 let cachedResets = [];
 let resetsUnsub = null;
-const canResetPasswords = p => p && lvl(p.rank) >= CAN_RESET_PASSWORDS_FROM_LEVEL;
+const canResetPasswords = p => p
+  && lvl(p.rank) >= CAN_RESET_PASSWORDS_FROM_LEVEL
+  && !['Правительство', 'Администратор', 'РП-Куратор'].includes(p.rank);
 let cachedDetentions = [];
 let cachedFines = [];
 let detentionsUnsub = null;
@@ -58,6 +60,8 @@ let dashboardConfigUnsub = null;
 let selectedArticles = [];   // временное хранилище для формы
 let selectedArticlesFine = [];
 let lawTypeFilter = { detentions: 'all', fines: 'all' };
+// Мультивыбор напарников: { reports: [uid, uid], detentions: [...], fines: [...] }
+let selectedPartners = { reports: [], detentions: [], fines: [] };
 
 const canReleaseEarly = p => p && CAN_RELEASE_EARLY.includes(p.rank);
 const canEditAnyDetention = p => p && CAN_EDIT_ANY_DETENTION.includes(p.rank);
@@ -76,16 +80,14 @@ let testHistoryFilters = {
 let testHistorySort = 'date';  // date | score | name
 
 // Роли, которые могут УПРАВЛЯТЬ тестами (создавать, редактировать, удалять)
-// Позже можно дописать сюда "РП Куратор" и другие роли
 const TEST_MANAGER_ROLES = [
-  'Старший администратор'
-  // 'РП Куратор',  ← раскомментируешь, когда добавишь роль
+  'Старший администратор',
+  'РП-Куратор'
 ];
 
-// Роли, которые ВИДЯТ ВСЕ тесты (не только свои) — для управления и просмотра истории
 const TEST_SEE_ALL_ROLES = [
-  'Старший администратор'
-  // 'РП Куратор',
+  'Старший администратор',
+  'РП-Куратор'
 ];
 
 const canManageTests = p => p && TEST_MANAGER_ROLES.includes(p.rank);
@@ -151,32 +153,149 @@ const isPolice = p => p && ROLES[p.rank]?.police === true;
 const canReview = p => p && lvl(p.rank) >= 9;
 const canDelReports = p => p && CAN_DELETE_REPORTS.includes(p.rank);
 const canManageStaff = p => p && CAN_MANAGE_STAFF.includes(p.rank);
+// Кто может ВИДЕТЬ раздел Кадры (просмотр)
+function canViewStaff(p) {
+  if (!p) return false;
+  if (isPolice(p)) return true;
+  if (canManageStaff(p)) return true;
+  if (['Правительство', 'Администратор'].includes(p.rank)) return true;
+  return false;
+}
+
+// Кто может ВИДЕТЬ Дашборд
+function canViewDashboard(p) {
+  if (!p) return false;
+  if (canManageStaff(p)) return true;
+  if (['Правительство', 'Администратор'].includes(p.rank)) return true;
+  return false;
+}
 const isAdmin = p => p && ['Администратор','Старший администратор'].includes(p.rank);
 
 // Кого может менять me (target): только тех, у кого уровень ниже
+// Может ли me менять РОЛЬ/СТАТУС цели (нанимать, увольнять, повышать/понижать)
 function canEditUser(me, target) {
   if (!me || !target) return false;
   if (me.uid === target.uid) return false;
 
-  // Руководитель ОБН — особые права: только ОБН
+  // Старший администратор — все, ВКЛЮЧАЯ Гражданского
+  if (me.rank === 'Старший администратор') {
+    return lvl(me.rank) > lvl(target.rank);
+  }
+
+  // Руководитель ОБН — только Агент ОБН
   if (me.rank === 'Руководитель ОБН') {
     return target.rank === 'Агент ОБН';
+  }
+
+  // Полковник — только младшие 3 ранга
+  if (me.rank === 'Полковник') {
+    return ['Рядовой', 'Капрал', 'Сержант'].includes(target.rank);
+  }
+
+  // Генерал, Губернатор, РП-Куратор — все ниже себя, КРОМЕ Гражданского
+  if (['Генерал полиции','Губернатор','РП-Куратор'].includes(me.rank)) {
+    if (target.rank === 'Гражданский') return false;
+    return lvl(me.rank) > lvl(target.rank);
   }
 
   if (!canManageStaff(me)) return false;
   return lvl(me.rank) > lvl(target.rank);
 }
 
+// Может ли me выдавать выговор/поощрение/сброс пароля для target
+function canWarnAwardReset(me, target) {
+  if (!me || !target) return false;
+  if (me.uid === target.uid) return false;
+
+  // Правительство и Администратор — только смотрят, не взаимодействуют
+  if (['Правительство', 'Администратор'].includes(me.rank)) return false;
+
+  // Руководитель ОБН — только Агент ОБН
+  if (me.rank === 'Руководитель ОБН') {
+    return target.rank === 'Агент ОБН';
+  }
+
+  // Остальные — все, кто ниже
+  return lvl(me.rank) > lvl(target.rank);
+}
+
+// ===== НАЙМ И УВОЛЬНЕНИЕ =====
+
+// Может ли me НАНЯТЬ этого гражданского (принять на службу)
+function canHireUser(me, target) {
+  if (!me || !target) return false;
+  if (target.rank !== 'Гражданский') return false;
+
+  if (me.rank === 'Полковник')        return true;
+  if (me.rank === 'Руководитель ОБН') return true;
+  if (me.rank === 'РП-Куратор')       return true;
+
+  if (['Генерал полиции','Губернатор','Старший администратор'].includes(me.rank)) {
+    return true;
+  }
+
+  return false;
+}
+
+// Какие роли может ВЫДАТЬ me при найме
+function rolesIHire(me) {
+  if (!me) return [];
+
+  if (me.rank === 'Полковник')        return ['Рядовой', 'Капрал', 'Сержант'];
+  if (me.rank === 'Руководитель ОБН') return ['Агент ОБН'];
+
+  if (me.rank === 'РП-Куратор') {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(me.rank) && r !== 'Гражданский');
+  }
+
+  if (['Генерал полиции','Губернатор','Старший администратор'].includes(me.rank)) {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(me.rank) && r !== 'Гражданский');
+  }
+
+  return [];
+}
+// Может ли me УВОЛИТЬ этого сотрудника
+function canFireUser(me, target) {
+  if (!me || !target) return false;
+  if (me.uid === target.uid) return false;
+  if (target.rank === 'Гражданский') return false;
+
+  if (me.rank === 'Полковник') {
+    return ['Рядовой','Капрал','Сержант'].includes(target.rank);
+  }
+  if (me.rank === 'Руководитель ОБН') {
+    return target.rank === 'Агент ОБН';
+  }
+  if (me.rank === 'РП-Куратор') {
+    return lvl(target.rank) < lvl(me.rank);
+  }
+  if (['Генерал полиции','Губернатор','Старший администратор'].includes(me.rank)) {
+    return lvl(me.rank) > lvl(target.rank);
+  }
+  return false;
+}
+
 // Какие роли может выдавать me
 function rolesIAssign(me) {
   if (!me) return [];
+
+  // Старший администратор — все роли кроме своей (включая Гражданского)
+  if (me.rank === 'Старший администратор') {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(me.rank));
+  }
 
   // Руководитель ОБН — только Агент ОБН
   if (me.rank === 'Руководитель ОБН') {
     return ['Агент ОБН'];
   }
 
-  return ROLES_ORDERED.filter(r => lvl(r) < lvl(me.rank));
+  // Полковник — только младшие 3 ранга
+  if (me.rank === 'Полковник') {
+    return ['Рядовой', 'Капрал', 'Сержант'];
+  }
+
+  // Все остальные — всё ниже себя, КРОМЕ Гражданского
+  return ROLES_ORDERED.filter(r => lvl(r) < lvl(me.rank) && r !== 'Гражданский');
 }
 
 // Какие роли может выдавать me ЧЕРЕЗ ПРИГЛАШЕНИЯ
@@ -208,11 +327,16 @@ function rolesIAssignViaInvite(me) {
   if (role === 'Старший администратор') {
     return ROLES_ORDERED.filter(r => lvl(r) < lvl(role));
   }
-
+  // РП-Куратор — все роли ниже себя, кроме Гражданского
+  if (role === 'РП-Куратор') {
+    return ROLES_ORDERED.filter(r => lvl(r) < lvl(role) && r !== 'Гражданский');
+  }
   return [];
 }
 
-const canGiveAwards = p => p && CAN_GIVE_AWARDS.includes(p.rank);
+const canGiveAwards = p => p
+  && CAN_GIVE_AWARDS.includes(p.rank)
+  && !['Правительство', 'Администратор'].includes(p.rank);
 
 const canPinReports = p => p && lvl(p.rank) >= CAN_PIN_REPORTS_FROM_LEVEL;
 const canUnpinAny   = p => p && lvl(p.rank) >= CAN_UNPIN_ANY_FROM_LEVEL;
@@ -831,6 +955,86 @@ function toast(msg, type='ok') {
   setTimeout(() => el.remove(), 3000);
 }
 
+/* ==================== МУЛЬТИВЫБОР НАПАРНИКОВ ==================== */
+
+function renderPartnerPicker(stateKey) {
+  return `
+    <div class="form-group">
+      <label>Напарники (можно несколько)</label>
+      <select class="partner-add-select" data-partner-add="${stateKey}">
+        <option value="">— Добавить напарника —</option>
+      </select>
+      <div class="partner-chips" id="partner-chips-${stateKey}"></div>
+    </div>
+  `;
+}
+
+function refreshPartnerChips(stateKey) {
+  const box = document.getElementById(`partner-chips-${stateKey}`);
+  const sel = document.querySelector(`[data-partner-add="${stateKey}"]`);
+  if (!box || !sel) return;
+
+  const uids = selectedPartners[stateKey] || [];
+
+  if (uids.length === 0) {
+    box.innerHTML = '<span class="partner-empty">Никого не выбрано</span>';
+  } else {
+    box.innerHTML = uids.map(uid => {
+      const u = cachedUsers.find(x => x.uid === uid);
+      if (!u) return '';
+      return `
+        <div class="partner-chip">
+          <span>${escapeHtml(u.nickname)} <em>${escapeHtml(u.rank)}</em></span>
+          <button type="button" data-rm-partner="${uid}" data-key="${stateKey}" title="Убрать">×</button>
+        </div>
+      `;
+    }).join('');
+
+    box.querySelectorAll('[data-rm-partner]').forEach(b => {
+      b.onclick = () => {
+        const uid = b.dataset.rmPartner;
+        selectedPartners[b.dataset.key] = selectedPartners[b.dataset.key].filter(x => x !== uid);
+        refreshPartnerChips(b.dataset.key);
+      };
+    });
+  }
+
+  // Заполняем селект теми, кто ещё не выбран
+  const opts = ['<option value="">— Добавить напарника —</option>'];
+  cachedUsers.forEach(u => {
+    if (u.status !== 'active') return;
+    if (u.uid === currentUser.uid) return;
+    if (!isPolice(u)) return;
+    if (uids.includes(u.uid)) return;
+    opts.push(`<option value="${u.uid}">${escapeHtml(u.nickname)} — ${escapeHtml(u.rank)}</option>`);
+  });
+  sel.innerHTML = opts.join('');
+}
+
+function initPartnerPicker(stateKey) {
+  setTimeout(() => {
+    const sel = document.querySelector(`[data-partner-add="${stateKey}"]`);
+    if (!sel) return;
+    sel.onchange = () => {
+      const uid = sel.value;
+      if (!uid) return;
+      if (!selectedPartners[stateKey].includes(uid)) {
+        selectedPartners[stateKey].push(uid);
+      }
+      refreshPartnerChips(stateKey);
+      sel.value = '';
+    };
+    refreshPartnerChips(stateKey);
+  }, 0);
+}
+
+function getPartnerObjects(stateKey) {
+  return (selectedPartners[stateKey] || []).map(uid => {
+    const u = cachedUsers.find(x => x.uid === uid);
+    return u ? { uid: u.uid, nickname: u.nickname, rank: u.rank } : null;
+  }).filter(Boolean);
+}
+
 /* ==================== ЗАГРУЗКА ФАЙЛОВ ==================== */
 async function uploadSingleFile(file, folder) {
   const formData = new FormData();
@@ -1266,16 +1470,14 @@ function subscribeTestResults() {
 /* ==================== ОТЧЁТЫ ==================== */
 async function submitReport() {
   const type = document.getElementById('r-type').value;
-  const partnerUid = document.getElementById('r-partner')?.value || '';
   const desc = document.getElementById('r-desc').value.trim();
 
   if (!desc) return toast('Заполни описание','err');
 
-  let partnerNick = '', partnerRank = '';
-  if (partnerUid) {
-    const p = cachedUsers.find(u => u.uid === partnerUid);
-    if (p) { partnerNick = p.nickname; partnerRank = p.rank; }
-  }
+  // Собираем массив партнёров
+  const partners = getPartnerObjects('reports');
+  const partnerUids = partners.map(p => p.uid);
+  const firstPartner = partners[0] || null;
 
   // Загрузка файлов
   let uploaded = [];
@@ -1289,8 +1491,13 @@ async function submitReport() {
     authorUid: currentUser.uid,
     authorNick: currentProfile.nickname,
     authorRank: currentProfile.rank,
-    partnerUid: partnerUid || null,
-    partnerNick, partnerRank,
+    // Старые поля — для совместимости
+    partnerUid: firstPartner?.uid || null,
+    partnerNick: firstPartner?.nickname || '',
+    partnerRank: firstPartner?.rank || '',
+    // Новые поля — массивы
+    partners: partners,
+    partnerUids: partnerUids,
     type,
     description: desc,
     files: uploaded,
@@ -1306,7 +1513,8 @@ async function submitReport() {
   pendingFiles.reports = [];
   refreshUploadList('reports');
   document.getElementById('r-desc').value = '';
-  document.getElementById('r-partner').value = '';
+  selectedPartners.reports = [];
+  refreshPartnerChips('reports');
   selectedReportTags = [];
   refreshTagsDisplay();
   clearDraft('reports');
@@ -1358,6 +1566,206 @@ async function saveUserRole(uid, newRole) {
   });
   toast('Роль обновлена: ' + newRole);
 }
+
+/* ==================== НАЙМ И УВОЛЬНЕНИЕ ==================== */
+
+// ---- Модалка найма ----
+function openHireModal(uid) {
+  const target = cachedUsers.find(u => u.uid === uid);
+  if (!target) return;
+
+  const availableRoles = rolesIHire(currentProfile);
+  if (availableRoles.length === 0) return toast('Нет доступных ролей', 'err');
+
+  openModal(`
+    <h3>✓ Принять на службу</h3>
+    <p class="modal-sub">
+      Гражданский: <strong style="color:var(--accent)">${escapeHtml(target.nickname)}</strong>
+    </p>
+
+    <div class="form-group">
+      <label>Должность</label>
+      <select id="hire-role">
+        ${availableRoles.map(r => `<option value="${r}">${r}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Причина приёма (обязательно)</label>
+      <textarea id="hire-reason" placeholder="Например: успешно прошёл собеседование..." style="min-height:80px"></textarea>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn" data-confirm>Принять</button>
+    </div>
+  `, (overlay, close) => {
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const role = overlay.querySelector('#hire-role').value;
+      const reason = overlay.querySelector('#hire-reason').value.trim();
+
+      if (!role) return toast('Выбери должность', 'err');
+      if (!reason) return toast('Укажи причину приёма', 'err');
+
+      // История
+      const historyEntry = {
+        from: target.rank,
+        to: role,
+        by: currentProfile.nickname,
+        byRank: currentProfile.rank,
+        at: new Date().toISOString(),
+        reason,
+        type: 'hire'
+      };
+
+      try {
+        await updateDoc(doc(db, 'users', uid), {
+          rank: role,
+          status: 'active',
+          rankHistory: [...(target.rankHistory || []), historyEntry],
+          firedInfo: null,   // на случай, если был уволен ранее
+          firedAcknowledged: true
+        });
+        close();
+        toast(`${target.nickname} принят на ${role}`);
+      } catch (e) {
+        console.error(e);
+        toast('Не удалось принять: ' + (e.message || 'ошибка'), 'err');
+      }
+    };
+  });
+}
+
+// ---- Модалка увольнения ----
+function openFireModal(uid) {
+  const target = cachedUsers.find(u => u.uid === uid);
+  if (!target) return;
+
+  openModal(`
+    <h3>🗑 Уволить сотрудника</h3>
+    <p class="modal-sub">
+      <strong style="color:var(--accent)">${escapeHtml(target.nickname)}</strong>
+      <span style="color:var(--muted)"> · ${escapeHtml(target.rank)}</span>
+    </p>
+
+    <div class="form-group">
+      <label>Причина увольнения (обязательно)</label>
+      <textarea id="fire-reason" placeholder="Например: неоднократное нарушение устава..." style="min-height:100px"></textarea>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn secondary" data-cancel>Отмена</button>
+      <button class="btn danger" data-confirm>Уволить</button>
+    </div>
+  `, (overlay, close) => {
+    overlay.querySelector('[data-cancel]').onclick = close;
+
+    overlay.querySelector('[data-confirm]').onclick = async () => {
+      const reason = overlay.querySelector('#fire-reason').value.trim();
+      if (!reason) return toast('Укажи причину увольнения', 'err');
+
+      const historyEntry = {
+        from: target.rank,
+        to: 'Гражданский',
+        by: currentProfile.nickname,
+        byRank: currentProfile.rank,
+        at: new Date().toISOString(),
+        reason,
+        type: 'fire'
+      };
+
+      try {
+        await updateDoc(doc(db, 'users', uid), {
+          rank: 'Гражданский',
+          status: 'active',           // сбрасываем статус
+          rankHistory: [...(target.rankHistory || []), historyEntry],
+          firedInfo: {
+            by: currentProfile.nickname,
+            byRank: currentProfile.rank,
+            at: new Date().toISOString(),
+            reason
+          },
+          firedAcknowledged: false
+        });
+        close();
+        toast(`${target.nickname} уволен`);
+      } catch (e) {
+        console.error(e);
+        toast('Не удалось уволить: ' + (e.message || 'ошибка'), 'err');
+      }
+    };
+  });
+}
+
+/* ==================== УВЕДОМЛЕНИЕ ОБ УВОЛЬНЕНИИ ==================== */
+
+// Проверка при входе: показать ли уведомление
+function checkFiredNotification(profile) {
+  if (!profile) return;
+  if (!profile.firedInfo) return;
+  if (profile.firedAcknowledged === true) return;
+
+  // Проверяем срок давности — 45 дней
+  const firedAt = new Date(profile.firedInfo.at).getTime();
+  const daysPassed = (Date.now() - firedAt) / (24 * 3600 * 1000);
+
+  if (daysPassed > 45) {
+    // Уведомление устарело — помечаем как прочитанное автоматически
+    updateDoc(doc(db, 'users', currentUser.uid), { firedAcknowledged: true })
+      .catch(err => console.warn('Не удалось пометить уведомление:', err));
+    return;
+  }
+
+  showFiredNotification(profile.firedInfo);
+}
+
+// Показ блокирующего уведомления
+function showFiredNotification(info) {
+  document.getElementById('firedNotice')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'firedNotice';
+  overlay.className = 'fired-notice-overlay';
+  overlay.innerHTML = `
+    <div class="fired-notice">
+      <div class="fired-notice-icon">⚠️</div>
+      <h3 class="fired-notice-title">ВЫ УВОЛЕНЫ</h3>
+      <div class="fired-notice-body">
+        <div class="fired-notice-row">
+          <span class="fired-notice-label">Кем уволен:</span>
+          <span class="fired-notice-value">${escapeHtml(info.by)} <em>(${escapeHtml(info.byRank || '')})</em></span>
+        </div>
+        <div class="fired-notice-row">
+          <span class="fired-notice-label">Когда:</span>
+          <span class="fired-notice-value">${fmtDate(info.at)}</span>
+        </div>
+        <div class="fired-notice-row">
+          <span class="fired-notice-label">Причина:</span>
+          <span class="fired-notice-value">${escapeHtml(info.reason)}</span>
+        </div>
+      </div>
+      <button class="btn danger" id="btnAckFired" style="width:100%;margin-top:16px">Ознакомлен</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Блокируем клики по фону
+  overlay.addEventListener('click', e => e.stopPropagation());
+
+  document.getElementById('btnAckFired').onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      await updateDoc(doc(db, 'users', currentUser.uid), { firedAcknowledged: true });
+    } catch (err) {
+      console.error('Не удалось сохранить ознакомление:', err);
+    }
+    overlay.remove();
+    if (currentProfile) currentProfile.firedAcknowledged = true;
+  };
+}
+
 async function setUserStatus(uid, status) {
   if (!STATUS_LABELS[status]) return toast('Неверный статус','err');
 
@@ -2045,7 +2453,6 @@ function refreshLawSelection(stateKey) {
 async function submitDetention() {
   const target = document.getElementById('d-target').value.trim();
   const prison = parseInt(document.getElementById('d-prison').value, 10);
-  const partnerUid = document.getElementById('d-partner')?.value || '';
   const comment = document.getElementById('d-comment').value.trim();
 
   if (!target) return toast('Укажи ФИО задержанного','err');
@@ -2063,12 +2470,8 @@ async function submitDetention() {
     if (!confirm(`Рекомендуемый срок по статьям: ${recommended} мин.\nТы ставишь ${prison} мин.\nУверен?`)) return;
   }
 
-  const partners = [];
-  if (partnerUid) {
-    const p = cachedUsers.find(u => u.uid === partnerUid);
-    if (p) partners.push({ uid: p.uid, nickname: p.nickname, rank: p.rank });
-  }
-
+  const partners = getPartnerObjects('detentions');
+  const partnerUids = partners.map(p => p.uid);
 
   let uploaded = [];
   if (pendingFiles.detentions.length > 0) {
@@ -2089,6 +2492,7 @@ async function submitDetention() {
     authorNick: currentProfile.nickname,
     authorRank: currentProfile.rank,
     partners,
+    partnerUids,
     files: uploaded,
     comment,
     status: 'pending',
@@ -2108,6 +2512,8 @@ async function submitDetention() {
   document.getElementById('d-comment').value = '';
   pendingFiles.detentions = [];
   refreshUploadList('detentions');
+  selectedPartners.detentions = [];
+  refreshPartnerChips('detentions');
   clearDraft('detentions');
 }
 
@@ -2115,7 +2521,6 @@ async function submitDetention() {
 async function submitFine() {
   const target = document.getElementById('f-target').value.trim();
   const amount = parseInt(document.getElementById('f-amount').value, 10);
-  const partnerUid = document.getElementById('f-partner')?.value || '';
   const comment = document.getElementById('f-comment').value.trim();
 
   if (!target) return toast('Укажи ФИО','err');
@@ -2128,11 +2533,8 @@ async function submitFine() {
     if (!confirm(`Рекомендуемый штраф: ${totalMin}–${totalMax} exp.\nТы ставишь ${amount} exp.\nУверен?`)) return;
   }
 
-  const partners = [];
-  if (partnerUid) {
-    const p = cachedUsers.find(u => u.uid === partnerUid);
-    if (p) partners.push({ uid: p.uid, nickname: p.nickname, rank: p.rank });
-  }
+  const partners = getPartnerObjects('fines');   // ← ИСПРАВИЛ: было 'detentions'
+  const partnerUids = partners.map(p => p.uid);
 
   // Загрузка файлов (ДО addDoc!)
   let uploaded = [];
@@ -2155,6 +2557,7 @@ async function submitFine() {
     authorNick: currentProfile.nickname,
     authorRank: currentProfile.rank,
     partners,
+    partnerUids,
     files: uploaded,
     comment,
     status: 'pending',
@@ -2173,6 +2576,8 @@ async function submitFine() {
   document.getElementById('f-comment').value = '';
   pendingFiles.fines = [];
   refreshUploadList('fines');
+  selectedPartners.fines = [];            
+  refreshPartnerChips('fines');             
   clearDraft('fines');
 }
 
@@ -2306,13 +2711,13 @@ function buildNav() {
             if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
       html += `<a class="nav-link" data-route="#/registry/detentions">⚖️ Реестр</a>`;
     }
-    if (isPolice(currentProfile) || canManageStaff(currentProfile)) {
+    if (canViewStaff(currentProfile)) {
       html += `<a class="nav-link" data-route="#/staff">👮 Кадры</a>`;
     }
     if (canResetPasswords(currentProfile)) {
       html += `<a class="nav-link" data-route="#/passwords">🔐 Сброс паролей</a>`;
     }
-    if (canManageStaff(currentProfile)) {
+    if (canViewDashboard(currentProfile)) {
       html += `<a class="nav-link" data-route="#/dashboard">📊 Дашборд</a>`;
     }
     if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
@@ -2373,11 +2778,11 @@ function renderHome() {
     `);
   }
 
-  // Кадры — полиции и тем, кто может управлять
-  if (isPolice(p) || canManageStaff(p)) {
+  // Кадры — полиции, начальству и Правительству/Администрации (просмотр)
+  if (canViewStaff(p)) {
     cards.push(`
       <div class="card" onclick="location.hash='#/staff'">
-        <h4>👮 Кадры</h4><p>Состав фракции и управление.</p>
+        <h4>👮 Кадры</h4><p>Состав фракции${canManageStaff(p) ? ' и управление' : ''}.</p>
       </div>
     `);
   }
@@ -2440,8 +2845,7 @@ function renderReports() {
         <option>Патруль</option><option>Рейд / Обыск</option>
         <option>Расследование</option><option>Задержание</option><option>Другое</option>
       </select></div>
-    <div class="form-group"><label>С кем был патруль</label>
-      <select id="r-partner"><option value="">— Один / не указано —</option></select></div>
+    ${renderPartnerPicker('reports')}
 
     <div class="form-group">
       <label class="label-with-attach">
@@ -2465,17 +2869,7 @@ function renderReports() {
     initFileUploaders();
     initTagPicker();
 
-    const pSel = document.getElementById('r-partner');
-    if (pSel) {
-      const opts = ['<option value="">— Один / не указано —</option>'];
-      cachedUsers.forEach(u => {
-        if (u.status !== 'active') return;
-        if (u.uid === currentUser.uid) return;
-        if (!isPolice(u)) return;
-        opts.push(`<option value="${u.uid}">${escapeHtml(u.nickname)} — ${escapeHtml(u.rank)}</option>`);
-      });
-      pSel.innerHTML = opts.join('');
-    }
+    initPartnerPicker('reports');
 
     initDraft('reports', {
       'r-type': 'type',
@@ -2505,7 +2899,8 @@ function renderReports() {
       canReview(currentProfile) ||
       canManageStaff(currentProfile) ||
       r.authorUid === currentUser.uid ||
-      r.partnerUid === currentUser.uid
+      r.partnerUid === currentUser.uid ||
+      (Array.isArray(r.partnerUids) && r.partnerUids.includes(currentUser.uid))
     );
 
     // Фильтр по тегам (множественный)
@@ -2564,7 +2959,15 @@ function renderReports() {
             <div class="report-date">${fmtDate(r.createdAt)}</div>
           </div>
           <div class="report-type">${escapeHtml(r.type)} · ${statusLabel(r.status)}</div>
-          ${r.partnerNick ? `<div class="report-type" style="background:#1a2338;color:var(--accent)">👥 С кем: ${escapeHtml(r.partnerNick)} — ${escapeHtml(r.partnerRank || '')}</div>` : ''}
+          ${(() => {
+            if (Array.isArray(r.partners) && r.partners.length > 0) {
+              return `<div class="report-type" style="background:#1a2338;color:var(--accent)">👥 С кем: ${r.partners.map(p => escapeHtml(p.nickname) + ' — ' + escapeHtml(p.rank || '')).join(', ')}</div>`;
+            }
+            if (r.partnerNick) {
+              return `<div class="report-type" style="background:#1a2338;color:var(--accent)">👥 С кем: ${escapeHtml(r.partnerNick)} — ${escapeHtml(r.partnerRank || '')}</div>`;
+            }
+            return '';
+          })()}
           ${renderReportTags(r.tags)}
           <div class="report-desc">${escapeHtml(r.description)}</div>
           ${renderAttachments(r.files)}
@@ -2601,7 +3004,7 @@ function statusLabel(s) {
 /* ==================== ПРОФИЛЬ СОТРУДНИКА ==================== */
 /* ==================== ДАШБОРД ==================== */
 function renderDashboard() {
-  if (!canManageStaff(currentProfile)) return `<h2>Доступ запрещён</h2>`;
+  if (!canViewDashboard(currentProfile)) return `<h2>Доступ запрещён</h2>`;
 
   const now = Date.now();
   const periodMs = dashPeriod === 'week' ? 7*24*3600*1000 : 30*24*3600*1000;
@@ -2700,7 +3103,7 @@ function renderDashboard() {
 
   return `
     <h2>📊 Дашборд</h2>
-    <p class="doc-meta">Аналитика по фракции — только для Полковника и выше</p>
+<p class="doc-meta">Аналитика по фракции</p>
 
     <div class="dash-toolbar">
       <div class="dash-period">
@@ -2919,10 +3322,14 @@ function renderProfile(uid) {
 
     // Загружаем статистику
     try {
-      const [reports, detentions, fines] = await Promise.all([
+      const [reportsA, detentionsA, finesA,
+             reportsP, detentionsP, finesP] = await Promise.all([
         getDocs(query(collection(db,'reports'),  where('authorUid','==',uid))),
         getDocs(query(collection(db,'detentions'), where('authorUid','==',uid))),
-        getDocs(query(collection(db,'fines'),    where('authorUid','==',uid)))
+        getDocs(query(collection(db,'fines'),    where('authorUid','==',uid))),
+        getDocs(query(collection(db,'reports'),  where('partnerUids','array-contains',uid))),
+        getDocs(query(collection(db,'detentions'), where('partnerUids','array-contains',uid))),
+        getDocs(query(collection(db,'fines'),    where('partnerUids','array-contains',uid)))
       ]);
 
       // Последние записи (сортируем на клиенте)
@@ -2932,9 +3339,19 @@ function renderProfile(uid) {
         return tb - ta;
       });
 
-      const allReports   = reports.docs.map(d => ({ id: d.id, ...d.data() }));
-      const allDetentions= detentions.docs.map(d => ({ id: d.id, ...d.data() }));
-      const allFines     = fines.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Объединяем с дедупликацией по id (если я одновременно автор и напарник — не дублируем)
+      const dedupe = (arr1, arr2) => {
+        const map = new Map();
+        [...arr1, ...arr2].forEach(x => map.set(x.id, x));
+        return Array.from(map.values());
+      };
+
+      const allReports   = dedupe(reportsA.docs.map(d => ({ id: d.id, ...d.data() })),
+                                   reportsP.docs.map(d => ({ id: d.id, ...d.data() })));
+      const allDetentions= dedupe(detentionsA.docs.map(d => ({ id: d.id, ...d.data() })),
+                                   detentionsP.docs.map(d => ({ id: d.id, ...d.data() })));
+      const allFines     = dedupe(finesA.docs.map(d => ({ id: d.id, ...d.data() })),
+                                   finesP.docs.map(d => ({ id: d.id, ...d.data() })));
 
       sortByDate(allReports);
       sortByDate(allDetentions);
@@ -2975,10 +3392,13 @@ function renderProfile(uid) {
         </div>
       `;
 
+      const isPartnerIn = (item) => item.authorUid !== uid &&
+        (Array.isArray(item.partnerUids) ? item.partnerUids.includes(uid) : item.partnerUid === uid);
+
       const renderMiniReport = r => `
         <div class="profile-mini status-${r.status}">
           <div class="profile-mini-head">
-            <span>${escapeHtml(r.type || 'Отчёт')}</span>
+            <span>${escapeHtml(r.type || 'Отчёт')}${isPartnerIn(r) ? ' <em style="color:var(--accent-2);font-style:normal;font-size:11px">· как напарник</em>' : ''}</span>
             <span class="profile-mini-date">${fmtDate(r.createdAt)}</span>
           </div>
           <div class="profile-mini-body">${escapeHtml((r.description || '').slice(0, 100))}${(r.description || '').length > 100 ? '…' : ''}</div>
@@ -2989,7 +3409,7 @@ function renderProfile(uid) {
       const renderMiniDetention = d => `
         <div class="profile-mini status-${d.status}">
           <div class="profile-mini-head">
-            <span>👤 ${escapeHtml(d.target || '—')}</span>
+            <span>👤 ${escapeHtml(d.target || '—')}${isPartnerIn(d) ? ' <em style="color:var(--accent-2);font-style:normal;font-size:11px">· как напарник</em>' : ''}</span>
             <span class="profile-mini-date">${fmtDate(d.createdAt)}</span>
           </div>
           <div class="profile-mini-body">
@@ -3003,7 +3423,7 @@ function renderProfile(uid) {
       const renderMiniFine = f => `
         <div class="profile-mini status-${f.status}">
           <div class="profile-mini-head">
-            <span>👤 ${escapeHtml(f.target || '—')}</span>
+            <span>👤 ${escapeHtml(f.target || '—')}${isPartnerIn(f) ? ' <em style="color:var(--accent-2);font-style:normal;font-size:11px">· как напарник</em>' : ''}</span>
             <span class="profile-mini-date">${fmtDate(f.createdAt)}</span>
           </div>
           <div class="profile-mini-body">
@@ -3015,22 +3435,47 @@ function renderProfile(uid) {
       `;
 
       const rankHistoryHtml = rankHistory.length ? `
-        <h3 class="profile-section-title">🎖 История повышений</h3>
+        <h3 class="profile-section-title">🎖 История карьеры</h3>
         <div class="profile-history">
-          ${rankHistory.slice().reverse().map(h => `
-            <div class="history-item">
-              <div class="history-main">
-                <strong>${escapeHtml(h.from)}</strong>
-                <span style="color:var(--accent)">→</span>
-                <strong style="color:var(--accent)">${escapeHtml(h.to)}</strong>
+          ${rankHistory.slice().reverse().map(h => {
+            const isFire = h.type === 'fire';
+            const isHire = h.type === 'hire';
+            const accentColor = isFire ? 'var(--danger)' : (isHire ? 'var(--ok)' : 'var(--accent)');
+            const icon = isFire ? '🗑' : (isHire ? '✓' : '🎖');
+            const label = isFire ? 'Увольнение' : (isHire ? 'Приём' : 'Повышение');
+
+            return `
+              <div class="history-item" style="border-left:3px solid ${accentColor}">
+                <div class="history-main">
+                  <span style="color:${accentColor};font-size:11px;letter-spacing:1px;text-transform:uppercase">${icon} ${label}</span><br>
+                  <strong>${escapeHtml(h.from)}</strong>
+                  <span style="color:var(--muted)"> → </span>
+                  <strong style="color:${accentColor}">${escapeHtml(h.to)}</strong>
+                </div>
+                <div class="history-meta">
+                  ${fmtDate(h.at)} — ${escapeHtml(h.by)} (${escapeHtml(h.byRank || '')})
+                </div>
+                ${h.reason ? `<div class="history-reason">💬 ${escapeHtml(h.reason)}</div>` : ''}
               </div>
-              <div class="history-meta">
-                ${fmtDate(h.at)} — ${escapeHtml(h.by)} (${escapeHtml(h.byRank || '')})
-              </div>
-            </div>
-          `).join('')}
+            `;
+          }).join('')}
         </div>
       ` : '';
+
+      // Блок "Уволен" — если сотрудник был уволен и пока не принят обратно
+      const firedInfo = profile.firedInfo;
+      const firedHtml = (firedInfo && profile.firedAcknowledged !== true && profile.rank === 'Гражданский') ? `
+        <div class="fired-banner">
+          <div class="fired-banner-title">⚠️ СОТРУДНИК УВОЛЕН</div>
+          <div class="fired-banner-info">
+            <div>👤 Кем: <strong>${escapeHtml(firedInfo.by)}</strong> (${escapeHtml(firedInfo.byRank || '')})</div>
+            <div>🕐 Когда: <strong>${fmtDate(firedInfo.at)}</strong></div>
+            <div>💬 Причина: <strong>${escapeHtml(firedInfo.reason)}</strong></div>
+          </div>
+        </div>
+      ` : '';
+
+      // Показываем баннер в основном HTML (см. ниже)
 
       const awards = profile.awards || [];
       const awardsHtml = awards.length ? `
@@ -3079,6 +3524,8 @@ function renderProfile(uid) {
           </div>
         </div>
 
+        ${firedHtml}
+
         ${statBlock}
 
         ${rankHistoryHtml}
@@ -3108,7 +3555,7 @@ function renderProfile(uid) {
 }
 
 function renderStaff() {
-  if (!isPolice(currentProfile) && !canManageStaff(currentProfile)) {
+  if (!canViewStaff(currentProfile)) {
     return `<h2>Доступ запрещён</h2>`;
   }
   const active = cachedUsers.filter(u => u.status === 'active').length;
@@ -3157,6 +3604,7 @@ function renderStaff() {
 
     ${sorted.map(u => {
       const editable = canEditUser(currentProfile, u);
+      const canWarnTarget = canWarnAwardReset(currentProfile, u);
       const warns = u.warnings || [];
       const heavy = warns.filter(w => w.severity === 'heavy').length;
       const roleOptions = ROLES_ORDERED.map(r => {
@@ -3181,22 +3629,34 @@ function renderStaff() {
         ` : `<div class="role-label">${escapeHtml(u.rank)}</div>`}
         <div class="staff-actions">
           <button class="btn secondary" data-open-profile="${u.uid}" title="Открыть профиль">👤</button>
-          ${editable && u.rank !== 'Гражданский' ? `
-            <button class="btn secondary" data-warn="${u.uid}">⚠️</button>
-            ${canGiveAwards(currentProfile) && u.rank !== 'Гражданский' ? `<button class="btn secondary" data-award="${u.uid}" title="Поощрение">🏅</button>` : ''}
-            ${canResetPasswords(currentProfile) ? `<button class="btn secondary" data-reset="${u.uid}" title="Сбросить пароль">🔑</button>` : ''}
-            <select data-status="${u.uid}" class="status-select" title="Статус сотрудника">
-              ${Object.entries(STATUS_LABELS).map(([key, val]) =>
-                `<option value="${key}" ${u.status === key ? 'selected' : ''}>${val.label}</option>`
-              ).join('')}
-            </select>
-          ` : ''}
+
+          ${u.rank === 'Гражданский' ? `
+            ${canHireUser(currentProfile, u) ? `
+              <button class="btn" data-hire="${u.uid}" title="Принять на службу">✓ Принять</button>
+            ` : ''}
+          ` : `
+            ${canWarnTarget ? `<button class="btn secondary" data-warn="${u.uid}">⚠️</button>` : ''}
+            ${canWarnTarget && canGiveAwards(currentProfile) ? `<button class="btn secondary" data-award="${u.uid}" title="Поощрение">🏅</button>` : ''}
+            ${canWarnTarget && canResetPasswords(currentProfile) ? `<button class="btn secondary" data-reset="${u.uid}" title="Сбросить пароль">🔑</button>` : ''}
+            ${editable ? `
+              <select data-status="${u.uid}" class="status-select" title="Статус сотрудника">
+                ${Object.entries(STATUS_LABELS)
+                  .filter(([key]) => key !== 'fired')
+                  .map(([key, val]) =>
+                    `<option value="${key}" ${u.status === key ? 'selected' : ''}>${val.label}</option>`
+                  ).join('')}
+              </select>
+            ` : ''}
+            ${canFireUser(currentProfile, u) ? `
+              <button class="btn danger" data-fire="${u.uid}" title="Уволить">🗑</button>
+            ` : ''}
+          `}
         </div>
       </div>
       ${warns.length ? `<div style="padding:0 14px 10px 26px">
         ${warns.map(w => `<div class="warning-item small" style="border-left-color:${WARNING_LEVELS[w.severity]?.color}">
           <span><strong>${WARNING_LEVELS[w.severity]?.label}</strong> · ${escapeHtml(w.reason)} · от ${escapeHtml(w.from)} · ${fmtDate(w.date)}</span>
-          ${editable ? `<button class="btn tiny secondary" data-rmwarn="${u.uid}:${w.id}">×</button>` : ''}
+          ${canWarnTarget ? `<button class="btn tiny secondary" data-rmwarn="${u.uid}:${w.id}">×</button>` : ''}
         </div>`).join('')}
       </div>` : ''}
     `;
@@ -3232,6 +3692,13 @@ function renderStaff() {
         const [uid, wid] = b.dataset.rmwarn.split(':');
         removeWarning(uid, wid);
       };
+    });
+    // Найм и увольнение
+    document.querySelectorAll('[data-hire]').forEach(b => {
+      b.onclick = () => openHireModal(b.dataset.hire);
+    });
+    document.querySelectorAll('[data-fire]').forEach(b => {
+      b.onclick = () => openFireModal(b.dataset.fire);
     });
     // Открытие раздела Приглашения
     document.getElementById('btnOpenInvites')?.addEventListener('click', () => {
@@ -3440,10 +3907,7 @@ function renderDetentions() {
       <input id="d-prison" type="number" min="1" max="${DETENTION_MAX_PRISON_MINUTES}" placeholder="10">
     </div>
 
-    <div class="form-group">
-      <label>Напарник (необязательно)</label>
-      <select id="d-partner"><option value="">— Один —</option></select>
-    </div>
+    ${renderPartnerPicker('detentions')}
 
     <div class="form-group">
       <label class="label-with-attach">
@@ -3502,17 +3966,7 @@ function renderDetentions() {
       if (prisonInput.value === '') prisonInput.value = 1;
     });
   }
-    // Партнёры
-    const pSel = document.getElementById('d-partner');
-    if (pSel) {
-      const opts = ['<option value="">— Один —</option>'];
-      cachedUsers.forEach(u => {
-        if (u.status !== 'active' || u.uid === currentUser.uid) return;
-        if (!isPolice(u)) return;
-        opts.push(`<option value="${u.uid}">${escapeHtml(u.nickname)} — ${escapeHtml(u.rank)}</option>`);
-      });
-      pSel.innerHTML = opts.join('');
-    }
+    initPartnerPicker('detentions');
     // Кнопки действий в карточках
     document.querySelectorAll('[data-det-act]').forEach(b => {
       b.onclick = () => {
@@ -3536,7 +3990,8 @@ function renderDetentions() {
     canReview(currentProfile) ||
     canManageStaff(currentProfile) ||
     r.authorUid === currentUser.uid ||
-    (r.partners || []).some(p => p.uid === currentUser.uid)
+    (r.partners || []).some(p => p.uid === currentUser.uid) ||
+    (Array.isArray(r.partnerUids) && r.partnerUids.includes(currentUser.uid))
   );
 
   return `
@@ -3626,8 +4081,7 @@ function renderFines() {
     <div class="form-group"><label>Сумма штрафа (exp)</label>
       <input id="f-amount" type="number" min="1" placeholder="10000"></div>
 
-    <div class="form-group"><label>Напарник (необязательно)</label>
-      <select id="f-partner"><option value="">— Один —</option></select></div>
+    ${renderPartnerPicker('fines')}
 
     <div class="form-group">
       <label class="label-with-attach">
@@ -3654,16 +4108,7 @@ function renderFines() {
     }
     refreshLawSelection('fines');
     initFileUploaders();
-    const pSel = document.getElementById('f-partner');
-    if (pSel) {
-      const opts = ['<option value="">— Один —</option>'];
-      cachedUsers.forEach(u => {
-        if (u.status !== 'active' || u.uid === currentUser.uid) return;
-        if (!isPolice(u)) return;
-        opts.push(`<option value="${u.uid}">${escapeHtml(u.nickname)} — ${escapeHtml(u.rank)}</option>`);
-      });
-      pSel.innerHTML = opts.join('');
-    }
+    initPartnerPicker('fines');
     document.querySelectorAll('[data-fine-act]').forEach(b => {
       b.onclick = () => {
         const [act, id] = b.dataset.fineAct.split(':');
@@ -4957,6 +5402,9 @@ onAuthStateChanged(auth, async user => {
     subscribeTestResults();
     render();
     hidePreloader('Добро пожаловать');
+
+    // Проверяем, не уволен ли пользователь
+    checkFiredNotification(profile);
   } else {
     currentUser = null; currentProfile = null;
     if (reportsUnsub) { reportsUnsub(); reportsUnsub = null; }
@@ -4986,6 +5434,9 @@ onAuthStateChanged(auth, async user => {
     // Пропускаем, если пользователь печатает в поле ввода
     const tag = (e.target.tagName || '').toLowerCase();
     const isTyping = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
+
+    // Если открыто блокирующее уведомление — игнорируем все горячие клавиши
+    if (document.getElementById('firedNotice')) return;
 
     // ---- ESC: закрывает модалку (работает всегда) ----
     if (e.key === 'Escape') {
