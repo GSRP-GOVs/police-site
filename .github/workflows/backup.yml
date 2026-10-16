@@ -15,10 +15,10 @@ jobs:
       - name: Checkout репозитория
         uses: actions/checkout@v4
 
-      - name: Установка Node.js 20
+      - name: Установка Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Установка firebase-admin
         run: npm install firebase-admin@12 --no-save
