@@ -1374,8 +1374,25 @@ async function doLogin() {
 }
 
 async function doLogout() {
-  if (reportsUnsub) { reportsUnsub(); reportsUnsub = null; }
-  if (invitesUnsub) { invitesUnsub(); invitesUnsub = null; }
+  // 1. Отписываемся от всех подписок
+  if (reportsUnsub)         { try { reportsUnsub(); }         catch(e){} reportsUnsub = null; }
+  if (invitesUnsub)         { try { invitesUnsub(); }         catch(e){} invitesUnsub = null; }
+  if (resetsUnsub)          { try { resetsUnsub(); }          catch(e){} resetsUnsub = null; }
+  if (detentionsUnsub)      { try { detentionsUnsub(); }      catch(e){} detentionsUnsub = null; }
+  if (finesUnsub)           { try { finesUnsub(); }           catch(e){} finesUnsub = null; }
+  if (reportsGlobalUnsub)   { try { reportsGlobalUnsub(); }   catch(e){} reportsGlobalUnsub = null; }
+  if (dashboardConfigUnsub) { try { dashboardConfigUnsub(); } catch(e){} dashboardConfigUnsub = null; }
+  if (announcementsUnsub)   { try { announcementsUnsub(); }   catch(e){} announcementsUnsub = null; }
+  if (testsUnsub)           { try { testsUnsub(); }           catch(e){} testsUnsub = null; }
+  if (testResultsUnsub)     { try { testResultsUnsub(); }     catch(e){} testResultsUnsub = null; }
+
+  // 2. Сбрасываем состояние
+  currentTestRun = null;
+
+  // 3. Даём Firestore 200 мс, чтобы корректно закрыть стримы
+  await new Promise(r => setTimeout(r, 200));
+
+  // 4. Теперь безопасно выходим
   await signOut(auth);
 }
 
@@ -1386,12 +1403,19 @@ async function loadProfile(uid) {
 
 /* ==================== РЕАЛТАЙМ ==================== */
 function subscribeUsers() {
-  onSnapshot(collection(db,'users'), snap => {
-    cachedUsers = [];
-    snap.forEach(d => cachedUsers.push({ uid: d.id, ...d.data() }));
-    cachedUsers.sort((a,b) => lvl(b.rank) - lvl(a.rank));
-    if (['#/staff','#/reports'].includes(location.hash)) render();
-  });
+  onSnapshot(
+    collection(db,'users'),
+    snap => {
+      cachedUsers = [];
+      snap.forEach(d => cachedUsers.push({ uid: d.id, ...d.data() }));
+      cachedUsers.sort((a,b) => lvl(b.rank) - lvl(a.rank));
+      if (['#/staff','#/reports'].includes(location.hash)) render();
+    },
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('users listener:', err);
+    }
+  );
 }
 function subscribeInvites() {
   if (invitesUnsub) invitesUnsub();
@@ -1450,7 +1474,10 @@ function subscribeTests() {
         render();
       }
     },
-    err => console.warn('tests listener:', err)
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('tests listener:', err);
+    }
   );
 }
 
@@ -1463,7 +1490,10 @@ function subscribeTestResults() {
       snap.forEach(d => cachedTestResults.push({ id: d.id, ...d.data() }));
       if (location.hash.startsWith('#/test-results')) render();
     },
-    err => console.warn('testResults listener:', err)
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('testResults listener:', err);
+    }
   );
 }
 
@@ -1893,6 +1923,10 @@ function subscribeAnnouncements() {
       cachedAnnouncements = [];
       snap.forEach(d => cachedAnnouncements.push({ id: d.id, ...d.data() }));
       if (location.hash === '#/announcements') render();
+    },
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('announcements listener:', err);
     }
   );
 }
@@ -2125,12 +2159,19 @@ async function removeAward(uid, awardId) {
 /* ==================== СБРОС ПАРОЛЕЙ ==================== */
 function subscribeResets() {
   if (resetsUnsub) resetsUnsub();
-  resetsUnsub = onSnapshot(collection(db,'passwordResets'), snap => {
-    cachedResets = [];
-    snap.forEach(d => cachedResets.push({ id: d.id, ...d.data() }));
-    cachedResets.sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
-    if (location.hash === '#/passwords') render();
-  });
+  resetsUnsub = onSnapshot(
+    collection(db,'passwordResets'),
+    snap => {
+      cachedResets = [];
+      snap.forEach(d => cachedResets.push({ id: d.id, ...d.data() }));
+      cachedResets.sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
+      if (location.hash === '#/passwords') render();
+    },
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('resets listener:', err);
+    }
+  );
 }
 
 function requestPasswordReset(uid) {
@@ -2273,6 +2314,10 @@ function subscribeDetentions() {
       cachedDetentions = [];
       snap.forEach(d => cachedDetentions.push({ id: d.id, ...d.data() }));
       if (location.hash === '#/detentions') render();
+    },
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('detentions listener:', err);
     }
   );
 }
@@ -2285,6 +2330,10 @@ function subscribeFines() {
       cachedFines = [];
       snap.forEach(d => cachedFines.push({ id: d.id, ...d.data() }));
       if (location.hash === '#/fines') render();
+    },
+    err => {
+      if (err?.code === 'permission-denied') return;
+      console.warn('fines listener:', err);
     }
   );
 }
@@ -2293,6 +2342,15 @@ function subscribeFines() {
 function lawLabel(law) {
   const stars = law.wantedLevel > 0 ? ' ' + '★'.repeat(law.wantedLevel) : '';
   return `${law.code} · ${law.title}${stars}`;
+}
+
+// Отображение звёзд с поддержкой диапазона (напр. 16.15: ★–★★★★★)
+function formatStars(law) {
+  if (!law || !law.wantedLevel) return '';
+  if (law.wantedLevelMin && law.wantedLevelMin < law.wantedLevel) {
+    return '★'.repeat(law.wantedLevelMin) + '–' + '★'.repeat(law.wantedLevel);
+  }
+  return '★'.repeat(law.wantedLevel);
 }
 
 function renderArticleSearch(inputId, resultsId, selectedId, stateKey) {
@@ -2307,6 +2365,8 @@ function renderArticleSearch(inputId, resultsId, selectedId, stateKey) {
                 data-law-type="${stateKey}:УК">УК</button>
         <button type="button" class="law-type-tab ${filter === 'АК' ? 'active' : ''}"
                 data-law-type="${stateKey}:АК">АК</button>
+        <button type="button" class="law-type-tab ${filter === 'ДК' ? 'active' : ''}"
+                data-law-type="${stateKey}:ДК">ДК</button>
       </div>
       <div class="law-search-wrap">
         <input id="${inputId}" type="text" placeholder="Номер статьи или название (например: 17.6 или неповиновение)" autocomplete="off">
@@ -2356,7 +2416,7 @@ function updateLawResults(inputId, resultsId, stateKey) {
       <span class="law-code">${escapeHtml(l.code)}</span>
       <span class="law-type">${escapeHtml(l.codeType)}</span>
       <span class="law-title">${escapeHtml(l.title)}</span>
-      ${l.wantedLevel ? `<span class="law-stars">${'★'.repeat(l.wantedLevel)}</span>` : ''}
+      ${l.wantedLevel ? `<span class="law-stars">${formatStars(l)}</span>` : ''}
     </div>
   `).join('');
 
@@ -2403,7 +2463,7 @@ function refreshLawSelection(stateKey) {
         <span class="law-code">${escapeHtml(l.code)}</span>
         <span class="law-type">${escapeHtml(l.codeType)}</span>
         <span class="law-title">${escapeHtml(l.title)}</span>
-        ${l.wantedLevel ? `<span class="law-stars">${'★'.repeat(l.wantedLevel)}</span>` : ''}
+        ${l.wantedLevel ? `<span class="law-stars">${formatStars(l)}</span>` : ''}
       </div>
     `).join('')}
   `;
@@ -2675,59 +2735,130 @@ async function editDetention(collectionName, id) {
 /* ==================== НАВИГАЦИЯ ==================== */
 function buildNav() {
   const nav = document.getElementById('nav');
-  const groups = {};
-  DOCS.forEach(d => { (groups[d.category] ||= []).push(d); });
+  const p = currentProfile;
 
-  let html = `<div class="nav-group">
-    <div class="nav-group-title">Навигация</div>
-    <a class="nav-link" data-route="#/home">🏠 Главная</a>
-  </div>`;
+  // Группируем документы по категориям (как в data.js)
+  const docGroups = {};
+  DOCS.forEach(d => { (docGroups[d.category] ||= []).push(d); });
 
-  for (const [cat, items] of Object.entries(groups)) {
-    html += `<div class="nav-group"><div class="nav-group-title">${cat}</div>`;
+  let html = '';
+
+  // ===== 🎯 ГЛАВНОЕ =====
+  {
+    const items = [];
+    items.push(`<a class="nav-link" data-route="#/home">🏠 Главная</a>`);
+
+    if (isPolice(p) || canReview(p)) {
+      items.push(`<a class="nav-link" data-route="#/reports">📝 Отчёты</a>`);
+    }
+    if (isPolice(p) || canReview(p) || canManageStaff(p)) {
+      items.push(`<a class="nav-link" data-route="#/registry/detentions">⚖️ Реестр</a>`);
+    }
+
+    if (items.length > 0) {
+      html += `<div class="nav-group">
+        <div class="nav-group-title">🎯 Главное</div>
+        ${items.join('')}
+      </div>`;
+    }
+  }
+
+  // ===== ⚙️ УПРАВЛЕНИЕ =====
+  {
+    const items = [];
+
+    if (canViewStaff(p)) {
+      items.push(`<a class="nav-link" data-route="#/staff">👮 Кадры</a>`);
+    }
+    if (canViewDashboard(p)) {
+      items.push(`<a class="nav-link" data-route="#/dashboard">📊 Дашборд</a>`);
+    }
+    if (canManageStaff(p)) {
+      items.push(`<a class="nav-link" data-route="#/invites">🔑 Приглашения</a>`);
+    }
+    if (canResetPasswords(p)) {
+      items.push(`<a class="nav-link" data-route="#/passwords">🔐 Сброс паролей</a>`);
+    }
+
+    if (items.length > 0) {
+      html += `<div class="nav-group">
+        <div class="nav-group-title">⚙️ Управление</div>
+        ${items.join('')}
+      </div>`;
+    }
+  }
+
+  // ===== 💬 ОБЩЕЕ =====
+  {
+    const items = [];
+
+    if (isPolice(p) || canReview(p) || canManageStaff(p)) {
+      items.push(`<a class="nav-link" data-route="#/announcements">📢 Объявления</a>`);
+    }
+    // Тесты — видны всем
+    items.push(`<a class="nav-link" data-route="#/tests">🎓 Тесты</a>`);
+
+    if (items.length > 0) {
+      html += `<div class="nav-group">
+        <div class="nav-group-title">💬 Общее</div>
+        ${items.join('')}
+      </div>`;
+    }
+  }
+
+  // ===== 🛡️ ФРАКЦИЯ =====
+  if (docGroups['Фракция']) {
+    html += `<div class="nav-group">
+      <div class="nav-group-title">🛡️ Фракция</div>`;
+    docGroups['Фракция'].forEach(d => {
+      html += `<a class="nav-link" data-route="#/doc/${d.id}">📄 ${d.title}</a>`;
+    });
+    html += `</div>`;
+  }
+
+  // ===== ⚖️ ЗАКОНОДАТЕЛЬНАЯ БАЗА =====
+  if (docGroups['Законодательная база']) {
+    html += `<div class="nav-group">
+      <div class="nav-group-title">⚖️ Законодательная база</div>`;
+    docGroups['Законодательная база'].forEach(d => {
+      html += `<a class="nav-link" data-route="#/doc/${d.id}">📄 ${d.title}</a>`;
+    });
+    html += `</div>`;
+  }
+
+  // ===== 📎 ДОПОЛНИТЕЛЬНО =====
+  if (docGroups['Дополнительно']) {
+    html += `<div class="nav-group">
+      <div class="nav-group-title">📎 Дополнительно</div>`;
+    docGroups['Дополнительно'].forEach(d => {
+      html += `<a class="nav-link" data-route="#/doc/${d.id}">📄 ${d.title}</a>`;
+    });
+    html += `</div>`;
+  }
+
+  // ===== 📜 ПРАВИЛА СЕРВЕРА =====
+  if (docGroups['Правила сервера']) {
+    html += `<div class="nav-group">
+      <div class="nav-group-title">📜 Правила сервера</div>`;
+    docGroups['Правила сервера'].forEach(d => {
+      html += `<a class="nav-link" data-route="#/doc/${d.id}">📄 ${d.title}</a>`;
+    });
+    html += `</div>`;
+  }
+
+  // ===== Остальные категории, если появятся =====
+  const usedCategories = ['Фракция', 'Законодательная база', 'Дополнительно', 'Правила сервера'];
+  for (const [cat, items] of Object.entries(docGroups)) {
+    if (usedCategories.includes(cat)) continue;
+    html += `<div class="nav-group">
+      <div class="nav-group-title">${cat}</div>`;
     items.forEach(d => {
       html += `<a class="nav-link" data-route="#/doc/${d.id}">📄 ${d.title}</a>`;
     });
     html += `</div>`;
   }
 
-  // Тесты — видны всем (гражданам, полиции, админам)
-  html += `<div class="nav-group">
-    <div class="nav-group-title">Обучение</div>
-    <a class="nav-link" data-route="#/tests">🎓 Тесты</a>
-  </div>`;
-
-  // Рабочие разделы — каждому по его правам
-  const hasWork = isPolice(currentProfile) || canReview(currentProfile) ||
-                  canManageStaff(currentProfile) || canResetPasswords(currentProfile);
-
-  if (hasWork) {
-    html += `<div class="nav-group">
-      <div class="nav-group-title">Работа</div>`;
-
-    if (isPolice(currentProfile) || canReview(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/reports">📝 Отчёты</a>`;
-    }
-            if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/registry/detentions">⚖️ Реестр</a>`;
-    }
-    if (canViewStaff(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/staff">👮 Кадры</a>`;
-    }
-    if (canResetPasswords(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/passwords">🔐 Сброс паролей</a>`;
-    }
-    if (canViewDashboard(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/dashboard">📊 Дашборд</a>`;
-    }
-    if (isPolice(currentProfile) || canReview(currentProfile) || canManageStaff(currentProfile)) {
-      html += `<a class="nav-link" data-route="#/announcements">📢 Объявления</a>`;
-    }
-
-    html += `</div>`;
-  }
-
-    // Мобильная кнопка «Выйти» внизу меню
+  // ===== Кнопка «Выйти» на мобильных =====
   html += `
     <div class="nav-group nav-logout-group">
       <button class="btn secondary nav-logout-btn" id="navLogout">🚪 Выйти</button>
@@ -2828,9 +2959,77 @@ function renderHome() {
 function renderDoc(id) {
   const d = DOCS.find(x => x.id === id);
   if (!d) return `<h2>Документ не найден</h2>`;
-  return `<h2>${d.title}</h2>
-    <div class="doc-meta">Раздел: ${d.category}</div>
-    <div class="doc-body">${escapeHtml(d.content)}</div>`;
+  return `<h2>${escapeHtml(d.title)}</h2>
+    <div class="doc-meta">Раздел: ${escapeHtml(d.category)}</div>
+    <div class="doc-body">${formatDocContent(d.content)}</div>`;
+}
+
+// ==================== АВТО-РАЗМЕТКА ТЕКСТОВ ДОКУМЕНТОВ ====================
+// Правила:
+//   "ГЛАВА N. ..."           → крупный заголовок главы (h2.doc-chapter)
+//   "N.M. Название" / "Статья N.M ..." → заголовок статьи (h3.doc-article)
+//   "═══════"                → горизонтальный разделитель (hr.doc-hr)
+//   всё остальное            → обычный текст (p.doc-p, переносы строк сохраняются)
+function formatDocContent(content) {
+  const lines = String(content || '').split('\n');
+  const out = [];
+  let buffer = [];
+
+  const flush = () => {
+    if (!buffer.length) return;
+    out.push(`<p class="doc-p">${escapeHtml(buffer.join('\n'))}</p>`);
+    buffer = [];
+  };
+
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    const t = line.trim();
+
+    if (!t) { flush(); continue; }
+
+    // Разделитель
+    if (/^═{3,}$/.test(t)) {
+      flush();
+      out.push('<hr class="doc-hr">');
+      continue;
+    }
+
+    // Картинка: [[IMG:путь/к/файлу.png]]
+    if (/^\[\[IMG:.+\]\]$/.test(t)) {
+      flush();
+      const url = t.slice(6, -2).trim();
+      out.push(`<figure class="doc-image">
+        <img src="${escapeHtml(url)}" alt="" loading="lazy">
+      </figure>`);
+      continue;
+    }
+
+    // Подзаголовок-название объекта (для Главы 2 «Юрисдикция»)
+    if (/^(Полицейский Департамент|База SWAT|База Национальной Гвардии|Остров Губернатора)$/i.test(t)) {
+      flush();
+      out.push(`<h3 class="doc-object">${escapeHtml(t)}</h3>`);
+      continue;
+    }
+
+    // Глава (арабские или римские цифры)
+    if (/^ГЛАВА\s+[IVXLCDM\d]+[\.\s]/i.test(t)) {
+      flush();
+      out.push(`<h2 class="doc-chapter">${escapeHtml(t)}</h2>`);
+      continue;
+    }
+
+    // Статья: "5.1. Название", "Статья 1. Название", "Статья 5.2.1 Название"
+    // НЕ трогаем "ч. 1 ..." и пункты "а) ..."
+    if (/^(Статья\s+)?\d+(\.\d+)*\.?\s+\S/.test(t)) {
+      flush();
+      out.push(`<h3 class="doc-article">${escapeHtml(t)}</h3>`);
+      continue;
+    }
+
+    buffer.push(line);
+  }
+  flush();
+  return out.join('');
 }
 
 function renderReports() {
@@ -5330,6 +5529,10 @@ document.getElementById('tabRegister').onclick = () => {
 document.getElementById('btnLogin').onclick = doLogin;
 document.getElementById('btnRegister').onclick = doRegister;
 document.getElementById('btnLogout').onclick = doLogout;
+// Клик по логотипу → Главная
+document.querySelector('.brand')?.addEventListener('click', () => {
+  location.hash = '#/home';
+});
 document.getElementById('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.getElementById('reg-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
 document.getElementById('globalSearch').addEventListener('input', e => globalSearch(e.target.value));
@@ -5380,6 +5583,11 @@ onAuthStateChanged(auth, async user => {
     document.getElementById('appScreen').classList.remove('hidden');
     document.getElementById('userNick').textContent = profile.nickname;
     document.getElementById('userRank').textContent = profile.rank;
+
+    // Сбрасываем hash на главную при входе
+    if (location.hash && location.hash !== '#/home') {
+      location.hash = '#/home';
+    }
 
     buildNav();
     subscribeUsers();
