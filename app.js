@@ -4621,6 +4621,17 @@ function renderInvites() {
   const canCreate = myRoles.length > 0;
   const now = Date.now();
 
+  // 🔒 ФИЛЬТРАЦИЯ ПО ПРАВАМ:
+  //   — свои приглашения видим всегда
+  //   — чужие — только если моя роль НЕ НИЖЕ роли, на которую выдано приглашение
+  const myLevel = lvl(currentProfile.rank);
+  const visibleInvites = cachedInvites.filter(inv => {
+    if (inv.createdBy === currentUser.uid) return true;
+    const inviteLevel = lvl(inv.role);
+    return myLevel >= inviteLevel;
+  });
+  const hiddenCount = cachedInvites.length - visibleInvites.length;
+
   // Обработчики (навешиваются после рендера)
   setTimeout(() => {
     document.getElementById('btnCreateInvite')?.addEventListener('click', createInvite);
@@ -4632,16 +4643,21 @@ function renderInvites() {
   return `
     <button class="btn secondary" style="margin-bottom:16px" onclick="location.hash='#/staff'">← Назад к Кадрам</button>
     <h2>🔑 Пригласительные коды</h2>
-    <p class="doc-meta">Создавай коды для регистрации новичков</p>
+    <p class="doc-meta">
+      Создавай коды для регистрации новичков
+      ${hiddenCount > 0
+        ? `<br><span style="color:var(--muted);font-size:11px">🔒 Ещё ${hiddenCount} приглашений скрыто — твоя роль ниже роли, на которую они выданы.</span>`
+        : ''}
+    </p>
 
     ${canCreate
       ? `<button class="btn" id="btnCreateInvite" style="margin-bottom:20px">+ Создать код</button>`
       : `<p class="doc-meta" style="color:var(--danger)">У тебя нет прав создавать приглашения</p>`}
 
     <div id="invitesList">
-      ${cachedInvites.length === 0
+      ${visibleInvites.length === 0
         ? '<p class="doc-meta">Кодов пока нет.</p>'
-        : cachedInvites.map(i => {
+        : visibleInvites.map(i => {
             const usedCount = i.usedCount || 0;
             const maxUses = i.maxUses || 1;
             const expiresAt = i.expiresAt ? new Date(i.expiresAt) : null;
