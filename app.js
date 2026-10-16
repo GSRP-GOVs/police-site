@@ -3413,8 +3413,9 @@ function globalSearch(query) {
       const at = lower.indexOf(q);
       if (at < 0) return;
 
+      const SNIPPET_MAX = 160;   // максимум символов в сниппете
       const start = Math.max(0, at - 60);
-      const end   = Math.min(text.length, at + q.length + 90);
+      const end   = Math.min(text.length, start + SNIPPET_MAX);
       const snippet =
         (start > 0 ? '…' : '') +
         text.slice(start, end).replace(/\s+/g, ' ') +
