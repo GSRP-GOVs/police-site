@@ -9,7 +9,7 @@ import {
   serverTimestamp, where, arrayUnion, arrayRemove
 } from 'firebase/firestore';
 
-import { firebaseConfig, MASTER_CODE } from './firebase-config.js';
+import { firebaseConfig } from './firebase-config.js';
 import {
   ROLES, ROLES_ORDERED, MAX_STAFF,
   CAN_MANAGE_STAFF, CAN_DELETE_REPORTS,
@@ -1318,15 +1318,20 @@ async function doRegister() {
   try {
     const cred = await createUserWithEmailAndPassword(auth, nickToEmail(nick), pass);
 
-    // Определяем роль
+    // Получаем список пользователей ДО создания профиля
+    // (нужен и для проверки "первый в системе", и для лимита)
+    const all = await getDocs(collection(db,'users'));
+
     let assignedRole = 'Гражданский';
     let inviteUsedId = null;
     let inviteCurrent = null;
 
-    if (code === MASTER_CODE) {
+    // 🔐 СЦЕНАРИЙ 1: система пуста → первый становится Старшим администратором
+    if (all.size === 0) {
       assignedRole = 'Старший администратор';
-    } else if (code) {
-      // Ищем в приглашениях
+    }
+    // 🔐 СЦЕНАРИЙ 2: регистрация по приглашению
+    else if (code) {
       const invSnap = await getDocs(query(collection(db,'invites'), where('code','==',code)));
       if (invSnap.empty) {
         await signOut(auth);
@@ -1359,12 +1364,16 @@ async function doRegister() {
 
       assignedRole = inv.role;
       inviteUsedId = invDoc.id;
-      inviteCurrent = inv;   // сохраним для обновления
+      inviteCurrent = inv;
+    }
+    // 🔐 СЦЕНАРИЙ 3: без кода → Гражданский
+    else {
+      assignedRole = 'Гражданский';
     }
 
-    // Проверка лимита только для полицейских
-    const all = await getDocs(collection(db,'users'));
-    if (assignedRole !== 'Гражданский' && all.size >= MAX_STAFF + 10) {
+    // Проверка лимита только для полицейских (Старший админ не считается — он bootstrap)
+    if (assignedRole !== 'Гражданский' && assignedRole !== 'Старший администратор'
+        && all.size >= MAX_STAFF + 10) {
       await signOut(auth);
       return err.textContent = 'Достигнут лимит сотрудников';
     }
