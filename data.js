@@ -20,7 +20,7 @@ export const ROLES = {
   'Губернатор':            { level: 80,  police: false },
   'Администратор':         { level: 90,  police: false },
   'РП-Куратор':            { level: 95,  police: true },
-  'Старший администратор': { level: 100, police: false }
+  'Старший администратор': { level: 100, police: true }
 };
 
 // Порядок для выпадающих списков (от старших к младшим)
