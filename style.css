@@ -3974,3 +3974,980 @@ input.at-limit {
 @media (max-width: 820px) {
   .doc-body .doc-object { font-size: 15px; padding: 8px 12px; margin: 20px 0 6px; }
 }
+
+/* ===== Подсветка найденной статьи из поиска ===== */
+.doc-body [data-search-idx].search-highlight {
+  animation: searchHighlight 2s cubic-bezier(.4, 0, .2, 1);
+  border-radius: 8px;
+}
+
+@keyframes searchHighlight {
+  0% {
+    outline: 3px solid var(--accent);
+    outline-offset: 8px;
+    background: rgba(240, 180, 41, 0.18);
+    box-shadow: 0 0 35px 6px rgba(240, 180, 41, 0.55);
+  }
+  60% {
+    outline: 3px solid rgba(240, 180, 41, 0.55);
+    outline-offset: 8px;
+    background: rgba(240, 180, 41, 0.08);
+    box-shadow: 0 0 22px 3px rgba(240, 180, 41, 0.25);
+  }
+  100% {
+    outline: 3px solid transparent;
+    outline-offset: 8px;
+    background: transparent;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* Мобильная версия — компактнее */
+@media (max-width: 820px) {
+  .doc-body [data-search-idx].search-highlight {
+    animation-name: searchHighlightMobile;
+  }
+  @keyframes searchHighlightMobile {
+    0% {
+      outline: 2px solid var(--accent);
+      outline-offset: 4px;
+      background: rgba(240, 180, 41, 0.18);
+      box-shadow: 0 0 22px 4px rgba(240, 180, 41, 0.5);
+    }
+    100% {
+      outline: 2px solid transparent;
+      outline-offset: 4px;
+      background: transparent;
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+}
+
+/* ===== Кнопка «Наверх» ===== */
+.scroll-top-btn {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #0a0f1c;
+  border: none;
+  font-size: 26px;
+  font-weight: 900;
+  cursor: pointer;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 24px rgba(240, 180, 41, .45),
+              0 2px 8px rgba(0, 0, 0, .4);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(20px) scale(.85);
+  transition: opacity .25s ease,
+              transform .25s ease,
+              visibility .25s;
+  padding: 0;
+  line-height: 1;
+  user-select: none;
+}
+
+.scroll-top-btn.visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+}
+
+.scroll-top-btn:hover {
+  background: #ffc745;
+  transform: translateY(-3px) scale(1.05);
+  box-shadow: 0 10px 30px rgba(240, 180, 41, .55),
+              0 4px 12px rgba(0, 0, 0, .5);
+}
+
+.scroll-top-btn:active {
+  transform: translateY(-1px) scale(1);
+}
+
+/* Прячем, когда открыта модалка (чтобы не перекрывать) */
+body:has(.modal-overlay) .scroll-top-btn {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* ===== Мобильная версия ===== */
+@media (max-width: 820px) {
+  .scroll-top-btn {
+    bottom: 20px;
+    right: 16px;
+    width: 46px;
+    height: 46px;
+    font-size: 22px;
+    box-shadow: 0 4px 18px rgba(240, 180, 41, .4),
+                0 2px 6px rgba(0, 0, 0, .35);
+  }
+}
+
+/* Очень узкие экраны — не перекрывает нижние кнопки */
+@media (max-width: 480px) {
+  .scroll-top-btn {
+    bottom: 16px;
+    right: 12px;
+    width: 42px;
+    height: 42px;
+    font-size: 20px;
+  }
+}
+
+/* ===== Оглавление документа ===== */
+.doc-toc {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin: 20px 0 28px;
+}
+
+.doc-toc-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 1px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  user-select: none;
+}
+
+.doc-toc-arrow {
+  font-size: 14px;
+  transition: transform .25s ease;
+}
+.doc-toc.collapsed .doc-toc-arrow {
+  transform: rotate(-90deg);
+}
+
+.doc-toc-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  max-height: 420px;
+  overflow-y: auto;
+  transition: max-height .3s ease, margin .3s ease;
+  scrollbar-width: thin;
+}
+
+.doc-toc.collapsed .doc-toc-list {
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.doc-toc-list li {
+  list-style: none;
+}
+
+.doc-toc-link {
+  display: block;
+  padding: 6px 10px;
+  color: var(--text);
+  font-size: 13px;
+  border-radius: 6px;
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  transition: .15s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-toc-link:hover {
+  background: var(--bg-3);
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+@media (max-width: 820px) {
+  .doc-toc { padding: 14px 16px; margin: 16px 0 22px; }
+  .doc-toc-list {
+    max-height: 320px;
+  }
+  .doc-toc-link { font-size: 12px; padding: 5px 8px; }
+  .doc-toc-title { font-size: 14px; }
+}
+
+/* ===== Счётчики «Мои за 7 дней» на главной ===== */
+.home-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 20px 0 8px;
+}
+
+.home-stat-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  background: linear-gradient(135deg, var(--bg-2) 0%, var(--bg-3) 100%);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: .2s;
+}
+
+.home-stat-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .4);
+}
+
+.home-stat-icon {
+  font-size: 32px;
+  line-height: 1;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 8px rgba(240, 180, 41, .3));
+}
+
+.home-stat-body {
+  min-width: 0;
+}
+
+.home-stat-num {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.home-stat-lbl {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+  letter-spacing: .5px;
+}
+
+@media (max-width: 820px) {
+  .home-stats {
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+    margin: 16px 0 6px;
+  }
+  .home-stat-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 12px;
+  }
+  .home-stat-icon { font-size: 24px; }
+  .home-stat-num  { font-size: 22px; }
+  .home-stat-lbl  { font-size: 10px; }
+}
+
+@media (max-width: 480px) {
+  .home-stat-card { padding: 10px; }
+  .home-stat-num  { font-size: 20px; }
+  .home-stat-lbl  { font-size: 9px; }
+}
+
+/* ===== Тумблер «Все / Мои» в отчётах ===== */
+.reports-filter-toggle {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg-2);
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+
+.reports-filter-btn {
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  transition: .15s;
+  white-space: nowrap;
+}
+
+.reports-filter-btn:hover {
+  color: var(--text);
+}
+
+.reports-filter-btn.active {
+  background: var(--accent);
+  color: #0a0f1c;
+}
+
+@media (max-width: 820px) {
+  .reports-filter-toggle {
+    display: flex;
+    width: 100%;
+    margin-bottom: 12px;
+  }
+  .reports-filter-btn {
+    flex: 1;
+    padding: 10px 8px;
+    font-size: 12px;
+  }
+}
+
+/* ===== Кнопка «?» и кликабельные чипы статей ===== */
+.law-btn.info {
+  color: var(--accent-2);
+  border-color: rgba(74, 144, 226, .5);
+  font-size: 14px;
+  font-weight: 800;
+  width: 26px;
+  height: 26px;
+}
+.law-btn.info:hover {
+  background: rgba(74, 144, 226, .15);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+}
+
+.law-chip.clickable {
+  cursor: pointer;
+  transition: .15s;
+}
+.law-chip.clickable:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(240, 180, 41, .2);
+}
+
+@media (max-width: 820px) {
+  .law-btn.info {
+    width: 30px;
+    height: 30px;
+    font-size: 15px;
+  }
+}
+
+/* ===== Расширенная статистика профиля ===== */
+
+/* График активности */
+.profile-activity-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 160px;
+  padding: 14px 12px 30px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  position: relative;
+}
+.profile-bar-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  position: relative;
+  min-width: 0;
+}
+.profile-bar {
+  width: 100%;
+  background: linear-gradient(180deg, var(--accent), rgba(240,180,41,.5));
+  border-radius: 3px 3px 0 0;
+  min-height: 3px;
+  transition: .2s;
+}
+.profile-bar-wrap:hover .profile-bar {
+  background: linear-gradient(180deg, #ffc745, var(--accent));
+}
+.profile-bar-count {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.profile-bar-label {
+  position: absolute;
+  bottom: -22px;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  transform: rotate(-40deg);
+  transform-origin: center;
+}
+
+/* Топ-списки (напарники, статьи) */
+.profile-top-list {
+  margin-bottom: 8px;
+}
+.profile-top-row {
+  display: grid;
+  grid-template-columns: 32px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 6px;
+  transition: .15s;
+}
+.profile-top-row:hover {
+  border-color: var(--accent);
+  background: var(--bg-3);
+  transform: translateX(2px);
+}
+.profile-top-place {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  text-align: center;
+}
+.profile-top-name {
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 0;
+  word-break: break-word;
+}
+.profile-top-rank {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 4px;
+}
+.profile-top-count {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+@media (max-width: 820px) {
+  .profile-activity-chart {
+    height: 130px;
+    padding: 10px 8px 34px;
+    gap: 3px;
+  }
+  .profile-bar-label { font-size: 9px; bottom: -20px; }
+  .profile-bar-count { font-size: 9px; }
+
+  .profile-top-row {
+    grid-template-columns: 26px 1fr auto;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .profile-top-place { font-size: 15px; }
+  .profile-top-name  { font-size: 13px; }
+  .profile-top-count { font-size: 12px; }
+}
+
+/* ===== Чек-лист повышения ===== */
+.promo-verdict {
+  padding: 14px 18px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 16px;
+  letter-spacing: .5px;
+}
+.promo-verdict.ok {
+  background: rgba(46, 204, 113, .12);
+  border: 1px solid var(--ok);
+  color: var(--ok);
+}
+.promo-verdict.pending {
+  background: rgba(240, 180, 41, .12);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.promo-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.promo-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  border-left: 3px solid var(--line);
+  font-size: 13px;
+}
+.promo-row.ok   { border-left-color: var(--ok); }
+.promo-row.fail { border-left-color: var(--danger); }
+
+.promo-icon { font-size: 16px; text-align: center; }
+.promo-label { color: var(--text); }
+.promo-value {
+  color: var(--muted);
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+}
+
+/* ===== Редактор чек-листов ===== */
+.promo-edit-row {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.promo-edit-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1.5fr;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.promo-edit-head strong { color: var(--accent); font-size: 14px; }
+.promo-edit-arrow   { color: var(--muted); }
+.promo-edit-head select { padding: 6px 10px; font-size: 13px; }
+
+.promo-edit-fields {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.promo-edit-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: .3px;
+}
+.promo-edit-fields input {
+  padding: 6px 8px;
+  font-size: 13px;
+  min-height: 34px;
+}
+
+@media (max-width: 820px) {
+  .promo-edit-head {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .promo-edit-arrow { display: none; }
+  .promo-edit-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+  .promo-row {
+    grid-template-columns: 24px 1fr auto;
+    font-size: 12px;
+    padding: 8px 10px;
+  }
+}
+
+/* ===== Бейдж риска в Кадрах ===== */
+.risk-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.risk-badge.risk-notice {
+  background: rgba(240, 180, 41, .15);
+  color: var(--accent);
+  border: 1px solid rgba(240, 180, 41, .4);
+}
+.risk-badge.risk-warning {
+  background: rgba(230, 126, 34, .15);
+  color: #e67e22;
+  border: 1px solid rgba(230, 126, 34, .4);
+}
+.risk-badge.risk-danger {
+  background: rgba(231, 76, 60, .18);
+  color: var(--danger);
+  border: 1px solid rgba(231, 76, 60, .5);
+  animation: riskPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes riskPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
+  50%      { box-shadow: 0 0 0 4px rgba(231, 76, 60, .15); }
+}
+
+/* Строка сотрудника с авто-пометкой «рекомендован к увольнению» */
+.staff-row.fire-recommended {
+  border-left: 4px solid var(--danger);
+  background: linear-gradient(90deg, rgba(231, 76, 60, .06) 0%, transparent 60%);
+}
+
+/* ===== Блок «Дисциплина» в профиле ===== */
+.discipline-status {
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 14px;
+  border-left: 4px solid var(--muted);
+  background: var(--bg-2);
+}
+.discipline-status.discipline-ok      { border-left-color: var(--ok); }
+.discipline-status.discipline-notice  { border-left-color: var(--accent); background: rgba(240,180,41,.05); }
+.discipline-status.discipline-warning { border-left-color: #e67e22; background: rgba(230,126,34,.06); }
+.discipline-status.discipline-danger  { border-left-color: var(--danger); background: rgba(231,76,60,.08); box-shadow: 0 0 25px rgba(231,76,60,.15); }
+
+.discipline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.discipline-label {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: var(--text);
+}
+.discipline-status.discipline-danger .discipline-label  { color: var(--danger); }
+.discipline-status.discipline-warning .discipline-label { color: #e67e22; }
+.discipline-status.discipline-notice  .discipline-label { color: var(--accent); }
+.discipline-status.discipline-ok      .discipline-label { color: var(--ok); }
+
+.discipline-counts {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: 'Courier New', monospace;
+}
+.discipline-hint {
+  font-size: 13px;
+  color: #c8d4e6;
+  line-height: 1.5;
+}
+.discipline-hint:empty { display: none; }
+
+/* ===== Блок «Дисциплина» на главной ===== */
+.home-discipline {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  margin: 16px 0;
+  border-left: 4px solid var(--muted);
+  background: var(--bg-2);
+}
+.home-discipline-notice  { border-left-color: var(--accent); background: rgba(240,180,41,.05); }
+.home-discipline-warning { border-left-color: #e67e22; background: rgba(230,126,34,.06); }
+.home-discipline-danger  { border-left-color: var(--danger); background: rgba(231,76,60,.08); box-shadow: 0 0 25px rgba(231,76,60,.15); }
+
+.home-discipline-icon {
+  font-size: 32px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.home-discipline-body { min-width: 0; }
+.home-discipline-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+  letter-spacing: .3px;
+}
+.home-discipline-notice  .home-discipline-title { color: var(--accent); }
+.home-discipline-warning .home-discipline-title { color: #e67e22; }
+.home-discipline-danger  .home-discipline-title { color: var(--danger); }
+
+.home-discipline-meta {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: 'Courier New', monospace;
+}
+
+@media (max-width: 820px) {
+  .discipline-status { padding: 12px 14px; }
+  .discipline-label  { font-size: 13px; }
+  .discipline-hint   { font-size: 12px; }
+
+  .home-discipline { padding: 12px 14px; gap: 12px; }
+  .home-discipline-icon { font-size: 26px; }
+  .home-discipline-title { font-size: 14px; }
+  .home-discipline-meta { font-size: 11px; }
+
+  .risk-badge { font-size: 9px; padding: 2px 8px; }
+}
+
+/* ===== Заявка на отпуск — кнопка в профиле ===== */
+.vacation-btn {
+  margin-top: 12px;
+  padding: 9px 18px;
+  font-size: 13px;
+  width: auto;
+}
+
+/* ===== Блок статуса заявки ===== */
+.vacation-status {
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin: 16px 0;
+  border-left: 4px solid var(--muted);
+  background: var(--bg-2);
+}
+.vacation-status-pending  { border-left-color: var(--accent); background: rgba(240,180,41,.06); }
+.vacation-status-approved { border-left-color: var(--ok);     background: rgba(46,204,113,.06); }
+.vacation-status-rejected { border-left-color: var(--danger); background: rgba(231,76,60,.06); }
+
+.vacation-status-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.vacation-status-icon { font-size: 22px; line-height: 1; }
+.vacation-status-label {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .3px;
+}
+.vacation-status-pending  .vacation-status-label { color: var(--accent); }
+.vacation-status-approved .vacation-status-label { color: var(--ok); }
+.vacation-status-rejected .vacation-status-label { color: var(--danger); }
+
+.vacation-status-body {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.vacation-status-reason {
+  font-size: 13px;
+  color: #c8d4e6;
+  padding: 8px 12px;
+  background: var(--bg-3);
+  border-radius: 6px;
+  margin: 8px 0;
+  white-space: pre-wrap;
+}
+.vacation-status-review {
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+/* ===== Превью в модалке заявки ===== */
+.vac-preview {
+  margin: 6px 0 4px;
+}
+.vac-preview-ok {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(46,204,113,.1);
+  border-left: 3px solid var(--ok);
+  color: var(--ok);
+  font-size: 13px;
+}
+.vac-preview-err {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(231,76,60,.1);
+  border-left: 3px solid var(--danger);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+@media (max-width: 820px) {
+  .vacation-btn { width: 100%; padding: 12px; font-size: 14px; }
+  .vacation-status { padding: 14px; }
+  .vacation-status-label { font-size: 14px; }
+  .vacation-status-body  { font-size: 13px; }
+  .vacation-status-reason { font-size: 12px; }
+}
+
+/* ===== Вкладка заявок на отпуск в Кадрах ===== */
+.vac-section {
+  margin: 20px 0 24px;
+  padding: 4px 0;
+}
+
+.vac-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.vac-filter-btn {
+  padding: 7px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: .15s;
+  white-space: nowrap;
+}
+.vac-filter-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.vac-filter-btn.active {
+  background: var(--accent);
+  color: #0a0f1c;
+  border-color: var(--accent);
+}
+
+.vac-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vac-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 12px;
+  transition: .15s;
+}
+.vac-row:hover { border-color: rgba(240,180,41,.4); }
+
+.vac-row-pending  { border-left-color: var(--accent); }
+.vac-row-approved { border-left-color: var(--ok); background: linear-gradient(135deg, var(--bg-2) 0%, rgba(46,204,113,.04) 100%); }
+.vac-row-rejected { border-left-color: var(--danger); opacity: .8; }
+
+.vac-row-main { min-width: 0; }
+
+.vac-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.vac-row-user {
+  font-size: 15px;
+}
+.vac-row-user strong { color: var(--text); }
+.vac-row-rank {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+.vac-row-status {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
+  letter-spacing: .5px;
+}
+.vac-row-status-pending  { background: rgba(240,180,41,.15); color: var(--accent); }
+.vac-row-status-approved { background: rgba(46,204,113,.15); color: var(--ok); }
+.vac-row-status-rejected { background: rgba(231,76,60,.15);  color: var(--danger); }
+
+.vac-row-dates {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.vac-row-reason {
+  font-size: 13px;
+  color: #c8d4e6;
+  background: var(--bg-3);
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.vac-row-review {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 10px;
+  background: rgba(0,0,0,.15);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+.vac-row-created {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.vac-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.vac-row-actions .btn {
+  width: auto;
+  min-width: 110px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+/* Бейдж «до 15.03» у сотрудника */
+.vac-until {
+  color: var(--accent-2);
+  font-size: 12px;
+}
+
+@media (max-width: 820px) {
+  .vac-filter-bar {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 10px;
+    scrollbar-width: none;
+  }
+  .vac-filter-bar::-webkit-scrollbar { display: none; }
+  .vac-filter-btn { flex-shrink: 0; font-size: 11px; padding: 6px 12px; }
+
+  .vac-row {
+    grid-template-columns: 1fr;
+    padding: 12px;
+    gap: 10px;
+  }
+  .vac-row-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .vac-row-actions .btn {
+    flex: 1;
+    min-width: 90px;
+  }
+  .vac-row-user { font-size: 14px; }
+  .vac-row-dates { font-size: 12px; }
+  .vac-row-reason { font-size: 12px; }
+}
