@@ -32,6 +32,25 @@ const db = getFirestore(fbApp);
 /* ==================== СОСТОЯНИЕ ==================== */
 let currentUser = null;
 let currentProfile = null;
+let isRegistering = false; // Защита от гонки при регистрации
+
+// Функция для повторных попыток, если Firestore ещё не получил токен
+async function firestoreWithRetry(operation, maxRetries = 10) {
+  let lastErr;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (err.code === 'permission-denied' || err.message?.includes('insufficient permissions')) {
+        lastErr = err;
+        await new Promise(r => setTimeout(r, 500)); // Ждём 0.5 сек
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
+}
 let reportsUnsub = null;
 let invitesUnsub = null;
 let cachedUsers = [];
@@ -1315,84 +1334,91 @@ async function doRegister() {
   const emailLocal = translit(nick).toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'');
   if (emailLocal.length < 3) return err.textContent = 'Имя содержит недопустимые символы';
 
-  try {
-    const cred = await createUserWithEmailAndPassword(auth, nickToEmail(nick), pass);
+  if (isRegistering) return;
+  isRegistering = true;
+  let cred = null;
 
-    // Получаем список пользователей ДО создания профиля
-    // (нужен и для проверки "первый в системе", и для лимита)
-    const all = await getDocs(collection(db,'users'));
+  try {
+    // 1. Создаём аккаунт в Auth
+    cred = await createUserWithEmailAndPassword(auth, nickToEmail(nick), pass);
+
+    // 2. Получаем список юзеров (с ретраем на случай задержки токена)
+    const all = await firestoreWithRetry(() => getDocs(collection(db,'users')));
 
     let assignedRole = 'Гражданский';
     let inviteUsedId = null;
     let inviteCurrent = null;
 
-    // 🔐 СЦЕНАРИЙ 1: система пуста → первый становится Старшим администратором
     if (all.size === 0) {
       assignedRole = 'Старший администратор';
-    }
-    // 🔐 СЦЕНАРИЙ 2: регистрация по приглашению
-    else if (code) {
-      const invSnap = await getDocs(query(collection(db,'invites'), where('code','==',code)));
-      if (invSnap.empty) {
-        await signOut(auth);
-        return err.textContent = 'Неверный код приглашения';
-      }
+    } else if (code) {
+      const invSnap = await firestoreWithRetry(() => 
+        getDocs(query(collection(db,'invites'), where('code','==',code)))
+      );
+      if (invSnap.empty) throw new Error('Неверный код приглашения');
 
       const invDoc = invSnap.docs[0];
       const inv = invDoc.data();
 
-      // Проверка срока действия
       if (inv.expiresAt && new Date(inv.expiresAt) < new Date()) {
-        await signOut(auth);
-        return err.textContent = 'Код приглашения истёк';
+        throw new Error('Код приглашения истёк');
       }
 
-      // Проверка использования
       const usedCount = inv.usedCount || 0;
       const maxUses = inv.maxUses || 1;
       if (usedCount >= maxUses) {
-        await signOut(auth);
-        return err.textContent = 'Код приглашения исчерпан';
+        throw new Error('Код приглашения исчерпан');
       }
 
-      // Проверка, что этот пользователь ещё не использовал код
       const usedByArr = inv.usedBy || [];
       if (usedByArr.includes(cred.user.uid)) {
-        await signOut(auth);
-        return err.textContent = 'Ты уже использовал этот код';
+        throw new Error('Ты уже использовал этот код');
       }
 
       assignedRole = inv.role;
       inviteUsedId = invDoc.id;
       inviteCurrent = inv;
     }
-    // 🔐 СЦЕНАРИЙ 3: без кода → Гражданский
-    else {
-      assignedRole = 'Гражданский';
-    }
 
-    await setDoc(doc(db,'users',cred.user.uid), {
-      nickname: nick,
-      rank: assignedRole,
-      status: 'active',
-      warnings: [],
-      createdAt: serverTimestamp()
-    });
+    // 3. Создаём профиль в Firestore
+    await firestoreWithRetry(() => 
+      setDoc(doc(db,'users',cred.user.uid), {
+        nickname: nick,
+        rank: assignedRole,
+        status: 'active',
+        warnings: [],
+        createdAt: serverTimestamp()
+      })
+    );
 
-    // Помечаем код использованным
+    // 4. Помечаем инвайт использованным
     if (inviteUsedId && inviteCurrent) {
       const oldUsedBy = inviteCurrent.usedBy || [];
       const oldCount = inviteCurrent.usedCount || 0;
-      await updateDoc(doc(db,'invites',inviteUsedId), {
-        usedBy: [...oldUsedBy, cred.user.uid],
-        usedByNicks: [...(inviteCurrent.usedByNicks || []), nick],
-        usedCount: oldCount + 1,
-        usedAt: serverTimestamp()
-      });
+      await firestoreWithRetry(() => 
+        updateDoc(doc(db,'invites',inviteUsedId), {
+          usedBy: [...oldUsedBy, cred.user.uid],
+          usedByNicks: [...(inviteCurrent.usedByNicks || []), nick],
+          usedCount: oldCount + 1,
+          usedAt: serverTimestamp()
+        })
+      );
     }
   } catch (e) {
     console.error(e);
-    err.textContent = translateErr(e.code || e.message);
+    err.textContent = e.code ? translateErr(e.code) : (e.message || 'Ошибка регистрации');
+
+    // Откат
+    if (cred && cred.user) {
+      try {
+        await cred.user.delete();
+        console.log('Откат успешен: удалён аккаунт из Auth');
+      } catch (delErr) {
+        console.error('Не удалось откатить регистрацию:', delErr);
+      }
+    }
+  } finally {
+    isRegistering = false;
   }
 }
 
@@ -6297,9 +6323,40 @@ onAuthStateChanged(auth, async user => {
     let profile = null;
     try {
       profile = await loadProfile(user.uid);
+      
       if (!profile) {
-        await new Promise(r => setTimeout(r, 800));
-        profile = await loadProfile(user.uid);
+        if (isRegistering) {
+          // Если прямо сейчас идёт регистрация, ждём, пока doRegister создаст профиль
+          let retries = 5;
+          while (retries > 0 && !profile) {
+            await new Promise(r => setTimeout(r, 800));
+            profile = await loadProfile(user.uid);
+            retries--;
+          }
+          if (!profile) {
+             await signOut(auth);
+             return;
+          }
+        } else {
+          // 🛠 ВОССТАНОВЛЕНИЕ: если профиля нет (сбой при регистрации) — создаём его на ходу
+          console.log('Профиль не найден. Авто-восстановление...');
+          
+          let defaultNick = user.email.split('@')[0].replace(/_/g, ' ');
+          defaultNick = defaultNick.replace(/\b\w/g, c => c.toUpperCase());
+
+          await firestoreWithRetry(() => 
+            setDoc(doc(db,'users',user.uid), {
+              nickname: defaultNick,
+              rank: 'Гражданский',
+              status: 'active',
+              warnings: [],
+              createdAt: serverTimestamp()
+            })
+          );
+          
+          profile = { uid: user.uid, nickname: defaultNick, rank: 'Гражданский', status: 'active', warnings: [] };
+          toast('Аккаунт восстановлен. Твой ник: ' + defaultNick, 'err');
+        }
       }
     } catch (err) {
       console.error('Ошибка связи с Firebase:', err);
