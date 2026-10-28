@@ -4982,12 +4982,16 @@ body:has(.modal-overlay) .scroll-top-btn {
   left: 50%;
   transform: translate(-50%, -150%);
   z-index: 99999;
-  background: linear-gradient(135deg, var(--bg-2) 0%, var(--bg-3) 100%);
-  border: 1px solid var(--accent);
+  /* Глубокий темно-бирюзовый фон */
+  background: linear-gradient(135deg, #142f32 0%, #0d2224 100%);
+  /* Обводка в тон фона, но чуть светлее */
+  border: 1px solid #1e4a4e;
   border-top: none;
+  border-bottom: 3px solid #2ecc71; /* Зеленая полоса снизу как акцент */
   border-radius: 0 0 14px 14px;
   padding: 14px 24px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6), 0 0 20px rgba(240, 180, 41, 0.2);
+  /* Легкое зеленоватое свечение */
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 25px rgba(46, 204, 113, 0.15);
   display: flex;
   align-items: center;
   gap: 14px;
@@ -5004,21 +5008,24 @@ body:has(.modal-overlay) .scroll-top-btn {
 .ann-banner-icon {
   font-size: 24px;
   animation: bellPulse 1.5s infinite;
+  filter: drop-shadow(0 0 8px rgba(240, 180, 41, 0.6));
 }
 
 .ann-banner-text {
   flex: 1;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+  color: #e6ecf5;
   line-height: 1.4;
 }
 
 .ann-banner-text span {
-  color: var(--accent);
   display: block;
-  font-size: 12px;
-  margin-top: 2px;
+  font-size: 13px;
+  margin-top: 3px;
+  font-weight: 600;
+  /* Название объявления делаем мятным */
+  color: #2ecc71;
 }
 
 @keyframes bellPulse {
@@ -5233,4 +5240,27 @@ body:has(.modal-overlay) .scroll-top-btn {
     width: 80px;
     height: 80px;
   }
+}
+
+/* Кнопка разблокировки звука на плашке */
+.ann-unmute-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  font-size: 16px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: .2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.ann-unmute-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a0f1c;
 }

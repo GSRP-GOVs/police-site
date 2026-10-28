@@ -7687,7 +7687,6 @@ function showAnnouncementBanner(ann) {
       <span>${escapeHtml(ann.title)}</span>
     </div>
   `;
-
   // Клик по плашке → переход в раздел
   banner.onclick = () => {
     location.hash = '#/announcements';
@@ -7700,58 +7699,59 @@ function showAnnouncementBanner(ann) {
   // Выезжает через 100мс (чтобы сработала анимация)
   setTimeout(() => banner.classList.add('show'), 100);
 
-  // Уезжает через 5 секунд
+  // Уезжает через 8 секунд
   setTimeout(() => {
     if (banner.parentNode) {
       banner.classList.remove('show');
       setTimeout(() => banner.remove(), 400);
     }
-  }, 5000);
+  }, 8000);
 }
 
 /* ==================== ЗВУКОВЫЕ УВЕДОМЛЕНИЯ ==================== */
 let audioCtx = null;
 
-// Разблокировка звука при первом клике (требование браузеров)
-document.addEventListener('click', () => {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
-  }
-}, { once: true });
-
-// Функция воспроизведения красивого «дзынь»
-function playNotificationSound() {
+// Создаем контекст ТОЛЬКО при клике пользователя
+function initAudio() {
+  if (audioCtx) return; 
   try {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume(); // Пытаемся разбудить, если браузер уснул
-    }
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) {}
+}
 
+// Вешаем на любые действия пользователя
+document.addEventListener('click', initAudio);
+document.addEventListener('keydown', initAudio);
+document.addEventListener('touchstart', initAudio);
+
+function playNotificationSound() {
+  // Если вкладка свернута, контекст не создан или браузер его усыпил — выходим без ошибок
+  if (document.hidden || !audioCtx || audioCtx.state === 'suspended') return;
+  
+  try {
     const now = audioCtx.currentTime;
-    const osc = audioCtx.createOscillator();
+    const osc1 = audioCtx.createOscillator();
+    const osc2 = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
 
-    osc.type = 'sine';
-    // Делаем приятный двухтональный звук (как в Discord)
-    osc.frequency.setValueAtTime(850, now);
-    osc.frequency.exponentialRampToValueAtTime(1250, now + 0.1);
+    osc1.type = 'sine';
+    osc2.type = 'sine';
+    
+    // Приятный аккорд (две ноты)
+    osc1.frequency.setValueAtTime(1318.51, now); // E6
+    osc2.frequency.setValueAtTime(1760.00, now); // A6
 
-    // Плавное появление и затухание, чтобы не било по ушам
     gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(0.4, now + 0.05); // Громкость (0.4 = 40%)
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    gain.gain.linearRampToValueAtTime(0.3, now + 0.05); 
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
 
-    osc.connect(gain);
+    osc1.connect(gain);
+    osc2.connect(gain);
     gain.connect(audioCtx.destination);
 
-    osc.start(now);
-    osc.stop(now + 0.6);
-  } catch (e) {
-    console.warn('Не удалось воспроизвести звук:', e);
-  }
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 0.8);
+    osc2.stop(now + 0.8);
+  } catch (e) {}
 }
