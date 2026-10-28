@@ -1,6 +1,19 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+  <script>
+  // Подавляем ошибку библиотеки веб-метрик (startTime), которая не влияет на сайт
+  window.addEventListener('error', function(event) {
+    if (
+      (event.message && event.message.includes("startTime")) ||
+      (event.error && event.error.stack && event.error.stack.includes("reportAllChanges"))
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+  }, true);
+  </script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PPD | Police Department</title>
@@ -9,9 +22,9 @@
 <script type="importmap">
 {
   "imports": {
-    "firebase/app": "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js",
-    "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js",
-    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js"
+    "firebase/app": "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js",
+    "firebase/auth": "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js"
   }
 }
 </script>

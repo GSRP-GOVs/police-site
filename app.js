@@ -1,3 +1,16 @@
+// Глушим системную ошибку библиотеки web-vitals (startTime)
+window.addEventListener('error', function(event) {
+  // Проверяем текст ошибки или стек вызовов
+  if (
+    (event.message && event.message.includes("startTime")) ||
+    (event.error && event.error.stack && event.error.stack.includes("reportAllChanges"))
+  ) {
+    event.preventDefault(); // Отменяем показ в консоли
+    event.stopPropagation(); // Останавливаем всплытие
+    return true;
+  }
+}, true); // Флаг true (capture) важен, чтобы поймать ошибку до того, как она попадет в консоль
+
 import { initializeApp } from 'firebase/app';
 import {
   getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
@@ -7755,3 +7768,11 @@ function playNotificationSound() {
     osc2.stop(now + 0.8);
   } catch (e) {}
 }
+
+// Глушим известную ошибку библиотеки web-vitals (startTime)
+window.addEventListener('error', (event) => {
+  if (event.message && event.message.includes('startTime') && event.message.includes('reportAllChanges')) {
+    event.preventDefault(); // Отменяем вывод в консоль
+    return true;
+  }
+});
