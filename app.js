@@ -1387,7 +1387,8 @@ async function doRegister() {
         rank: assignedRole,
         status: 'active',
         warnings: [],
-        createdAt: serverTimestamp()
+        createdAt: serverTimestamp(),
+        lastAnnouncementReadAt: serverTimestamp()
       })
     );
 
@@ -1999,6 +2000,10 @@ async function removeWarning(uid, warnId) {
   });
 }
 /* ==================== ОБЪЯВЛЕНИЯ ==================== */
+// Флаг, чтобы не показывать плашку при самой первой загрузке страницы, 
+// а только когда объявление реально приходит "в прямом эфире" или при входе
+let annInitialLoadDone = false;
+
 function subscribeAnnouncements() {
   if (announcementsUnsub) announcementsUnsub();
   announcementsUnsub = onSnapshot(
@@ -2006,7 +2011,25 @@ function subscribeAnnouncements() {
     snap => {
       cachedAnnouncements = [];
       snap.forEach(d => cachedAnnouncements.push({ id: d.id, ...d.data() }));
-      if (location.hash === '#/announcements') render();
+
+      // Обновляем меню (чтобы загорелась красная точка, если появилось новое)
+      buildNav();
+
+      if (location.hash === '#/announcements') {
+        render();
+      } else if (!annInitialLoadDone) {
+        // При входе на сайт проверяем, есть ли непрочитанные
+        annInitialLoadDone = true;
+        if (hasUnreadAnnouncements()) {
+          setTimeout(() => showAnnouncementBanner(cachedAnnouncements[0]), 1000);
+        }
+      } else {
+        // Если мы уже на сайте, и прилетело новое объявление
+        const hasNew = snap.docChanges().some(change => change.type === 'added');
+        if (hasNew && hasUnreadAnnouncements()) {
+          showAnnouncementBanner(cachedAnnouncements[0]);
+        }
+      }
     },
     err => {
       if (err?.code === 'permission-denied') return;
@@ -2891,7 +2914,8 @@ function buildNav() {
     const items = [];
 
     if (isPolice(p) || canReview(p) || canManageStaff(p)) {
-      items.push(`<a class="nav-link" data-route="#/announcements">📢 Объявления</a>`);
+      const unreadDot = hasUnreadAnnouncements() ? '<span class="nav-unread-dot"></span>' : '';
+      items.push(`<a class="nav-link" data-route="#/announcements">📢 Объявления ${unreadDot}</a>`);
     }
     // Тесты — видны всем
     items.push(`<a class="nav-link" data-route="#/tests">🎓 Тесты</a>`);
@@ -3945,6 +3969,11 @@ function renderAnnouncements() {
   if (!isPolice(currentProfile) && !canReview(currentProfile) && !canManageStaff(currentProfile)) {
     return `<h2>Доступ запрещён</h2>`;
   }
+
+  // Как только зашли в раздел — помечаем прочитанным
+  setTimeout(() => {
+    markAnnouncementsAsRead();
+  }, 100); // Небольшая задержка, чтобы DOM успел отрисоваться
 
   const canCreate = canCreateAnnouncements(currentProfile);
   const canPin = canPinAnnouncements(currentProfile);
@@ -6350,7 +6379,8 @@ onAuthStateChanged(auth, async user => {
               rank: 'Гражданский',
               status: 'active',
               warnings: [],
-              createdAt: serverTimestamp()
+              createdAt: serverTimestamp(),
+              lastAnnouncementReadAt: serverTimestamp()
             })
           );
           
@@ -7591,5 +7621,137 @@ async function processInterruptedTest(run, reason) {
     toast('Тест провален: ' + reason, 'err');
   } catch (e) {
     console.error('Не удалось сохранить прерванный тест:', e);
+  }
+}
+
+/* ==================== СИСТЕМА УВЕДОМЛЕНИЙ ОБ ОБЪЯВЛЕНИЯХ ==================== */
+
+// Проверяет, есть ли непрочитанные объявления
+function hasUnreadAnnouncements() {
+  if (!currentProfile || !cachedAnnouncements.length) return false;
+  
+  const latestAnn = cachedAnnouncements[0];
+  if (!latestAnn.createdAt) return false;
+
+  // Время последнего прочтения пользователя (если не читал — 0)
+  let lastRead = 0;
+  if (currentProfile.lastAnnouncementReadAt) {
+    lastRead = currentProfile.lastAnnouncementReadAt.toDate 
+      ? currentProfile.lastAnnouncementReadAt.toDate().getTime() 
+      : new Date(currentProfile.lastAnnouncementReadAt).getTime();
+  }
+
+  // Время создания самого свежего объявления
+  const latestTime = latestAnn.createdAt.toDate 
+    ? latestAnn.createdAt.toDate().getTime() 
+    : new Date(latestAnn.createdAt).getTime();
+
+  // Добавляем 1 секунду (1000 мс) буфера, чтобы не было ложных срабатываний
+  return latestTime > (lastRead + 1000);
+}
+
+// Отмечает все объявления как прочитанные
+async function markAnnouncementsAsRead() {
+  if (!currentUser) return;
+  
+  try {
+    const now = new Date();
+    await updateDoc(doc(db, 'users', currentUser.uid), {
+      lastAnnouncementReadAt: serverTimestamp()
+    });
+    
+    // Обновляем локально, чтобы не ждать ответа базы
+    if (currentProfile) currentProfile.lastAnnouncementReadAt = now;
+    
+    // Перестраиваем меню, чтобы убрать красную точку
+    buildNav();
+  } catch (e) {
+    console.warn('Не удалось отметить объявления прочитанными:', e);
+  }
+}
+
+// Показывает всплывающую плашку
+function showAnnouncementBanner(ann) {
+  const oldBanner = document.querySelector('.ann-banner');
+  if (oldBanner) oldBanner.remove();
+
+  // 🔊 Воспроизводим звук при появлении плашки
+  playNotificationSound();
+
+  const banner = document.createElement('div');
+  banner.className = 'ann-banner';
+  banner.innerHTML = `
+    <div class="ann-banner-icon">🔔</div>
+    <div class="ann-banner-text">
+      Новое объявление!
+      <span>${escapeHtml(ann.title)}</span>
+    </div>
+  `;
+
+  // Клик по плашке → переход в раздел
+  banner.onclick = () => {
+    location.hash = '#/announcements';
+    banner.classList.remove('show');
+    setTimeout(() => banner.remove(), 400);
+  };
+
+  document.body.appendChild(banner);
+
+  // Выезжает через 100мс (чтобы сработала анимация)
+  setTimeout(() => banner.classList.add('show'), 100);
+
+  // Уезжает через 5 секунд
+  setTimeout(() => {
+    if (banner.parentNode) {
+      banner.classList.remove('show');
+      setTimeout(() => banner.remove(), 400);
+    }
+  }, 5000);
+}
+
+/* ==================== ЗВУКОВЫЕ УВЕДОМЛЕНИЯ ==================== */
+let audioCtx = null;
+
+// Разблокировка звука при первом клике (требование браузеров)
+document.addEventListener('click', () => {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}, { once: true });
+
+// Функция воспроизведения красивого «дзынь»
+function playNotificationSound() {
+  try {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume(); // Пытаемся разбудить, если браузер уснул
+    }
+
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = 'sine';
+    // Делаем приятный двухтональный звук (как в Discord)
+    osc.frequency.setValueAtTime(850, now);
+    osc.frequency.exponentialRampToValueAtTime(1250, now + 0.1);
+
+    // Плавное появление и затухание, чтобы не било по ушам
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.4, now + 0.05); // Громкость (0.4 = 40%)
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.6);
+  } catch (e) {
+    console.warn('Не удалось воспроизвести звук:', e);
   }
 }
