@@ -11,7 +11,7 @@ import {
 
 import { firebaseConfig } from './firebase-config.js';
 import {
-  ROLES, ROLES_ORDERED, MAX_STAFF,
+  ROLES, ROLES_ORDERED,
   CAN_MANAGE_STAFF, CAN_DELETE_REPORTS,
   WARNING_LEVELS, DOCS, TESTS,
   CAN_RESET_PASSWORDS_FROM_LEVEL,
@@ -1369,13 +1369,6 @@ async function doRegister() {
     // 🔐 СЦЕНАРИЙ 3: без кода → Гражданский
     else {
       assignedRole = 'Гражданский';
-    }
-
-    // Проверка лимита только для полицейских (Старший админ не считается — он bootstrap)
-    if (assignedRole !== 'Гражданский' && assignedRole !== 'Старший администратор'
-        && all.size >= MAX_STAFF + 10) {
-      await signOut(auth);
-      return err.textContent = 'Достигнут лимит сотрудников';
     }
 
     await setDoc(doc(db,'users',cred.user.uid), {
@@ -4450,7 +4443,6 @@ function renderStaff() {
     return `<h2>Доступ запрещён</h2>`;
   }
   const active = cachedUsers.filter(u => u.status === 'active').length;
-  const fired  = cachedUsers.filter(u => u.status === 'fired').length;
   const iCanManage = canManageStaff(currentProfile);
   const myRoles = rolesIAssign(currentProfile);
 
@@ -4483,8 +4475,7 @@ function renderStaff() {
     </div>
     <p class="doc-meta">${iCanManage ? 'Ты можешь редактировать сотрудников ниже своего уровня' : 'Просмотр'}</p>
     <div class="counter-bar">
-      <span>Активных: <strong>${active}</strong> / ${MAX_STAFF}</span>
-      <span>Уволено: <strong>${fired}</strong></span>
+      <span>Активных: <strong>${active}</strong></span>
       <span>Всего: <strong>${cachedUsers.length}</strong></span>
     </div>
 
@@ -5643,6 +5634,9 @@ function startTestRun(testId) {
     timerId: null
   };
 
+  // 💾 Сохраняем тест в localStorage на случай обновления или ухода
+  localStorage.setItem('ppd_active_test', JSON.stringify(currentTestRun));
+
   location.hash = '#/test-run';
 }
 
@@ -5709,6 +5703,9 @@ function renderTestRun() {
 
         // Обновляем визуальную подсветку
         inp.closest('.option').classList.toggle('selected', inp.checked);
+
+        // 💾 Обновляем сохранение
+        localStorage.setItem('ppd_active_test', JSON.stringify(currentTestRun));
       };
     });
     // Кнопка далее/завершить
@@ -5826,6 +5823,7 @@ async function finishTestRun() {
   );
 
   currentTestRun = null;
+  localStorage.removeItem('ppd_active_test'); // 🧹 Очищаем, т.к. тест сдан
   location.hash = '#/test-result/' + resultId;
 }
 
@@ -5892,6 +5890,13 @@ function renderTestResult(resultId) {
     const outdated = isTestOutdated(r);
 
     box.innerHTML = `
+      ${r.failReason ? `
+        <div class="test-outdated-notice" style="border-color:var(--danger);color:var(--danger);background:rgba(231,76,60,.1); box-shadow: 0 0 20px rgba(231,76,60,.2);">
+          🚨 <strong>ТЕСТ ПРОВАЛЕН ДОСРОЧНО</strong><br>
+          Причина: ${escapeHtml(r.failReason)}
+        </div>
+      ` : ''}
+
       ${outdated ? `
         <div class="test-outdated-notice">
           ⚠️ <strong>Тест был изменён после этой попытки.</strong><br>
@@ -6099,6 +6104,7 @@ function renderTestHistoryList(testId, results) {
           <strong>${escapeHtml(r.userNick)}</strong>
           <span class="test-history-rank">${escapeHtml(r.userRank || '')}</span>
           ${outdated ? '<span class="test-outdated-badge">⚠️ устарело</span>' : ''}
+          ${r.failReason ? `<span class="test-fail-badge">🚨 ${escapeHtml(r.failReason)}</span>` : ''}
         </div>
         <div class="test-history-score">
           ${r.passed ? '✅' : '❌'} ${r.score}/${r.total} (${r.percent}%)
@@ -6141,6 +6147,12 @@ function showTestResultDetails(resultId) {
       <span style="color:var(--accent)"> · ${escapeHtml(r.userRank || '')}</span><br>
       ${fmtDate(r.finishedAt)} · ${r.score}/${r.total} (${r.percent}%)
     </p>
+    ${r.failReason ? `
+      <div class="test-outdated-notice" style="border-color:var(--danger);color:var(--danger);background:rgba(231,76,60,.1); margin-bottom:16px;">
+        🚨 <strong>Тест провален досрочно</strong><br>
+        Причина: ${escapeHtml(r.failReason)}
+      </div>
+    ` : ''}
     <div style="max-height:60vh;overflow-y:auto;padding-right:6px">
       ${answersHtml}
     </div>
@@ -6205,6 +6217,16 @@ function refreshTestHistoryList(testId) {
 function render() {
   if (!currentProfile) return;
   const hash = location.hash || '#/home';
+
+  // 🔥 ПРОВЕРКА ПЕРЕХОДА ПО САЙТУ: если ушли со страницы теста -> провал
+  if (currentTestRun && hash !== '#/test-run' && !hash.startsWith('#/test-result/')) {
+    const runToFail = currentTestRun;
+    currentTestRun = null;
+    localStorage.removeItem('ppd_active_test');
+    processInterruptedTest(runToFail, 'Вы ушли со страницы теста (открыли другой раздел)');
+    return; // Прерываем рендер, так как сейчас произойдет редирект
+  }  
+
   const content = document.getElementById('content');
 
   document.querySelectorAll('.nav-link').forEach(l =>
@@ -6312,6 +6334,22 @@ onAuthStateChanged(auth, async user => {
 
     // Проверяем, не истёк ли отпуск — если да, автоматически возвращаем в строй
     await checkExpiredVacation(profile);
+
+    // 🔥 ПРОВЕРКА ОБНОВЛЕНИЯ СТРАНИЦЫ (F5): если в памяти есть тест -> провал
+    const savedRunStr = localStorage.getItem('ppd_active_test');
+    if (savedRunStr) {
+      localStorage.removeItem('ppd_active_test');
+      try {
+        const savedRun = JSON.parse(savedRunStr);
+        // Запускаем с небольшой задержкой, чтобы сайт успел прогрузиться
+        setTimeout(() => {
+          processInterruptedTest(savedRun, 'Обновление страницы или выход с сайта');
+        }, 1000);
+      } catch (e) {
+        console.error('Ошибка чтения сохраненного теста', e);
+      }
+    }
+
 
     document.getElementById('authScreen').classList.add('hidden');
     document.getElementById('appScreen').classList.remove('hidden');
@@ -6514,7 +6552,7 @@ document.addEventListener('click', e => {
 window.addEventListener('beforeunload', e => {
   if (currentTestRun) {
     e.preventDefault();
-    e.returnValue = 'Тест не завершён. Точно уйти? Прогресс потеряется.';
+    e.returnValue = 'Если вы уйдете, тест будет автоматически провален!';
     return e.returnValue;
   }
 });
@@ -7440,4 +7478,61 @@ async function checkExpiredVacation(profile) {
     }
   }
   return false;
+}
+
+/* ==================== ПРИНУДИТЕЛЬНЫЙ ПРОВАЛ ТЕСТА ==================== */
+async function processInterruptedTest(run, reason) {
+  if (!currentUser || !currentProfile) return;
+
+  const total = run.questions.length;
+  let score = 0;
+  const answerLog = [];
+
+  // Считаем баллы за те вопросы, на которые успел ответить
+  run.questions.forEach((q, idx) => {
+    const selected = run.answers[idx] || [];
+    const correctIdxs = q.options.map((o, i) => o.correct ? i : -1).filter(i => i >= 0);
+    
+    const sortedSel = [...selected].sort((a,b) => a-b);
+    const sortedCor = [...correctIdxs].sort((a,b) => a-b);
+    const isCorrect = sortedSel.length === sortedCor.length && sortedSel.every((v, i) => v === sortedCor[i]);
+
+    if (isCorrect) score++;
+
+    answerLog.push({
+      questionId: q.id,
+      questionText: q.text,
+      selectedOptions: selected.map(i => q.options[i]?.text || ''),
+      correctOptions: correctIdxs.map(i => q.options[i]?.text || ''),
+      isCorrect
+    });
+  });
+
+  const percent = total > 0 ? Math.round((score / total) * 100) : 0;
+
+  try {
+    const ref = await addDoc(collection(db,'testResults'), {
+      testId: run.testId,
+      testTitle: run.test.title,
+      userId: currentUser.uid,
+      userNick: currentProfile.nickname,
+      userRank: currentProfile.rank,
+      score,
+      total,
+      percent,
+      passed: false,
+      failReason: reason, // 🔥 Записываем причину
+      answers: answerLog,
+      startedAt: run.startedAt,
+      finishedAt: serverTimestamp(),
+      audience: run.test.audience || 'all',
+      testQuestionsEditedAt: run.test.questionsEditedAt || null
+    });
+    
+    // Перекидываем на результат с пометкой провала
+    location.hash = '#/test-result/' + ref.id;
+    toast('Тест провален: ' + reason, 'err');
+  } catch (e) {
+    console.error('Не удалось сохранить прерванный тест:', e);
+  }
 }

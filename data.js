@@ -32,7 +32,7 @@ export const ROLES_ORDERED = [
   'Рядовой','Гражданский'
 ];
 
-export const MAX_STAFF = 24;
+// export const MAX_STAFF = 24; // Лимит убран по требованию
 
 /* ============ КТО МОЖЕТ ЧТО ============ */
 export const CAN_MANAGE_STAFF = [
